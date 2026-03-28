@@ -1,3 +1,4 @@
+mod discover;
 mod error;
 mod extract;
 mod graph;
