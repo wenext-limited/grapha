@@ -1,0 +1,4 @@
+[adapters]
+enabled = ["claude"]
+[dependencies]
+superpowers = { github = "obra/superpowers", branch = "main" }
