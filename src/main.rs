@@ -1,6 +1,7 @@
 mod discover;
 mod error;
 mod extract;
+mod filter;
 mod graph;
 mod merge;
 
