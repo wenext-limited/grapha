@@ -1,5 +1,7 @@
 # Grapha
 
+[中文文档](docs/README.CN.md)
+
 A lightweight structural abstraction layer that transforms source code into a normalized, graph-based representation optimized for LLM consumption.
 
 Instead of relying on compiler-level semantics, Grapha uses fast syntax parsing via [tree-sitter](https://tree-sitter.github.io/) to extract symbols, relationships, and call patterns, then compresses them into a navigable node graph. This enables agents to efficiently locate, traverse, and reason about code at scale with minimal context.
