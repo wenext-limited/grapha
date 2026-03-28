@@ -43,11 +43,7 @@ fn output_to_file() {
     let output = dir.path().join("out.json");
 
     grapha()
-        .args([
-            "tests/fixtures/simple.rs",
-            "-o",
-            output.to_str().unwrap(),
-        ])
+        .args(["tests/fixtures/simple.rs", "-o", output.to_str().unwrap()])
         .assert()
         .success();
 

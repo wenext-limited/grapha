@@ -5,3 +5,8 @@
 nodus.lock
 
 target
+
+
+# Added by cargo
+
+/target

@@ -10,11 +10,15 @@ use std::path::PathBuf;
 use anyhow::Context;
 use clap::Parser;
 
-use extract::rust::RustExtractor;
 use extract::LanguageExtractor;
+use extract::rust::RustExtractor;
 
 #[derive(Parser)]
-#[command(name = "grapha", version, about = "Structural code graph for LLM consumption")]
+#[command(
+    name = "grapha",
+    version,
+    about = "Structural code graph for LLM consumption"
+)]
 struct Cli {
     /// File or directory to analyze
     path: PathBuf,
@@ -37,13 +41,16 @@ fn main() -> anyhow::Result<()> {
 
     let mut results = Vec::new();
     for file in &files {
-        let source = std::fs::read(file).with_context(|| format!("failed to read {}", file.display()))?;
+        let source =
+            std::fs::read(file).with_context(|| format!("failed to read {}", file.display()))?;
 
         // Make path relative to the input path for cleaner IDs
         let relative = if cli.path.is_dir() {
             file.strip_prefix(&cli.path).unwrap_or(file)
         } else {
-            file.file_name().map(|n| n.as_ref()).unwrap_or(file.as_path())
+            file.file_name()
+                .map(|n| n.as_ref())
+                .unwrap_or(file.as_path())
         };
 
         match extractor.extract(&source, relative) {

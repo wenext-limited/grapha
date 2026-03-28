@@ -17,8 +17,7 @@ pub fn merge(results: Vec<ExtractionResult>) -> Graph {
     for r in results {
         for edge in r.edges {
             // Keep edges where the target is a known node or is a use-path (external reference)
-            if node_ids.contains(edge.target.as_str())
-                || edge.kind == crate::graph::EdgeKind::Uses
+            if node_ids.contains(edge.target.as_str()) || edge.kind == crate::graph::EdgeKind::Uses
             {
                 graph.edges.push(edge);
             }
