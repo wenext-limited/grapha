@@ -86,11 +86,12 @@ fn walk_node(
                     });
                 }
                 let node_id = graph_node.id.clone();
+                let node_name = graph_node.name.clone();
                 result.nodes.push(graph_node);
 
                 // Extract fields from the struct body
                 if let Some(body) = node.child_by_field_name("body") {
-                    extract_struct_fields(body, source, file, module_path, &node_id, result);
+                    extract_struct_fields(body, source, file, module_path, &node_id, &node_name, result);
                 }
             }
         }
@@ -106,11 +107,12 @@ fn walk_node(
                     });
                 }
                 let node_id = graph_node.id.clone();
+                let node_name = graph_node.name.clone();
                 result.nodes.push(graph_node);
 
                 // Extract variants from the enum body
                 if let Some(body) = node.child_by_field_name("body") {
-                    extract_enum_variants(body, source, file, module_path, &node_id, result);
+                    extract_enum_variants(body, source, file, module_path, &node_id, &node_name, result);
                 }
             }
         }
@@ -354,6 +356,7 @@ fn extract_struct_fields(
     file: &str,
     module_path: &[String],
     parent_id: &str,
+    parent_name: &str,
     result: &mut ExtractionResult,
 ) {
     let mut cursor = body.walk();
@@ -361,7 +364,8 @@ fn extract_struct_fields(
         if child.kind() == "field_declaration"
             && let Some(name) = field_text(child, "name", source)
         {
-            let id = make_id(file, module_path, &name);
+            let qualified = format!("{parent_name}.{name}");
+            let id = make_id(file, module_path, &qualified);
             let visibility = extract_visibility(child, source);
             let start = child.start_position();
             let end = child.end_position();
@@ -395,6 +399,7 @@ fn extract_enum_variants(
     file: &str,
     module_path: &[String],
     parent_id: &str,
+    parent_name: &str,
     result: &mut ExtractionResult,
 ) {
     let mut cursor = body.walk();
@@ -402,7 +407,8 @@ fn extract_enum_variants(
         if child.kind() == "enum_variant"
             && let Some(name) = field_text(child, "name", source)
         {
-            let id = make_id(file, module_path, &name);
+            let qualified = format!("{parent_name}.{name}");
+            let id = make_id(file, module_path, &qualified);
             let start = child.start_position();
             let end = child.end_position();
 
