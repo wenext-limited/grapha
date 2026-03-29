@@ -13,6 +13,11 @@ pub enum NodeKind {
     Module,
     Field,
     Variant,
+    Property,
+    Constant,
+    TypeAlias,
+    Protocol,  // Swift protocols
+    Extension, // Swift extensions
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -130,6 +135,30 @@ mod tests {
         };
         let json = serde_json::to_string(&edge).unwrap();
         assert!(json.contains("\"confidence\":0.95"));
+    }
+
+    #[test]
+    fn new_node_kinds_serialize_correctly() {
+        assert_eq!(
+            serde_json::to_string(&NodeKind::Property).unwrap(),
+            "\"property\""
+        );
+        assert_eq!(
+            serde_json::to_string(&NodeKind::Constant).unwrap(),
+            "\"constant\""
+        );
+        assert_eq!(
+            serde_json::to_string(&NodeKind::TypeAlias).unwrap(),
+            "\"type_alias\""
+        );
+        assert_eq!(
+            serde_json::to_string(&NodeKind::Protocol).unwrap(),
+            "\"protocol\""
+        );
+        assert_eq!(
+            serde_json::to_string(&NodeKind::Extension).unwrap(),
+            "\"extension\""
+        );
     }
 
     #[test]
