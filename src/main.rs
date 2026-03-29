@@ -13,6 +13,7 @@ use clap::Parser;
 
 use extract::LanguageExtractor;
 use extract::rust::RustExtractor;
+use extract::swift::SwiftExtractor;
 
 #[derive(Parser)]
 #[command(
@@ -33,15 +34,29 @@ struct Cli {
     filter: Option<String>,
 }
 
+fn extractor_for_path(path: &std::path::Path) -> Option<Box<dyn LanguageExtractor>> {
+    let ext = path.extension()?.to_str()?;
+    match ext {
+        "rs" => Some(Box::new(RustExtractor)),
+        "swift" => Some(Box::new(SwiftExtractor)),
+        _ => None,
+    }
+}
+
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
-    let extractor = RustExtractor;
-    let files = discover::discover_files(&cli.path, extractor.file_extensions())
-        .context("failed to discover files")?;
+    let all_extensions: &[&str] = &["rs", "swift"];
+    let files =
+        discover::discover_files(&cli.path, all_extensions).context("failed to discover files")?;
 
     let mut results = Vec::new();
     for file in &files {
+        let extractor = match extractor_for_path(file) {
+            Some(e) => e,
+            None => continue,
+        };
+
         let source =
             std::fs::read(file).with_context(|| format!("failed to read {}", file.display()))?;
 

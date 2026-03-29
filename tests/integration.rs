@@ -64,6 +64,17 @@ fn empty_directory_produces_empty_graph() {
 }
 
 #[test]
+fn analyzes_swift_file() {
+    grapha()
+        .arg("tests/fixtures/simple.swift")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"kind\": \"struct\""))
+        .stdout(predicate::str::contains("\"name\": \"Config\""))
+        .stdout(predicate::str::contains("\"kind\": \"function\""));
+}
+
+#[test]
 fn invalid_filter_shows_error() {
     grapha()
         .args(["tests/fixtures/simple.rs", "--filter", "bogus"])
