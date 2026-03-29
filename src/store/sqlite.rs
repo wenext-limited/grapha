@@ -92,7 +92,7 @@ impl Store for SqliteStore {
         // Insert nodes
         {
             let mut stmt = tx.prepare(
-                "INSERT INTO nodes (id, kind, name, file,
+                "INSERT OR REPLACE INTO nodes (id, kind, name, file,
                     span_start_line, span_start_col, span_end_line, span_end_col,
                     visibility, metadata)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
