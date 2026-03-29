@@ -8,7 +8,7 @@ fn grapha() -> Command {
 #[test]
 fn analyzes_single_file() {
     grapha()
-        .arg("tests/fixtures/simple.rs")
+        .args(["analyze", "tests/fixtures/simple.rs"])
         .assert()
         .success()
         .stdout(predicate::str::contains("\"kind\": \"struct\""))
@@ -20,7 +20,7 @@ fn analyzes_single_file() {
 #[test]
 fn analyzes_directory() {
     grapha()
-        .arg("tests/fixtures/multi")
+        .args(["analyze", "tests/fixtures/multi"])
         .assert()
         .success()
         .stdout(predicate::str::contains("\"name\": \"run\""))
@@ -30,7 +30,7 @@ fn analyzes_directory() {
 #[test]
 fn filter_option_works() {
     grapha()
-        .args(["tests/fixtures/simple.rs", "--filter", "fn"])
+        .args(["analyze", "tests/fixtures/simple.rs", "--filter", "fn"])
         .assert()
         .success()
         .stdout(predicate::str::contains("\"kind\": \"function\""))
@@ -43,7 +43,12 @@ fn output_to_file() {
     let output = dir.path().join("out.json");
 
     grapha()
-        .args(["tests/fixtures/simple.rs", "-o", output.to_str().unwrap()])
+        .args([
+            "analyze",
+            "tests/fixtures/simple.rs",
+            "-o",
+            output.to_str().unwrap(),
+        ])
         .assert()
         .success();
 
@@ -57,7 +62,7 @@ fn output_to_file() {
 fn empty_directory_produces_empty_graph() {
     let dir = tempfile::tempdir().unwrap();
     grapha()
-        .arg(dir.path().to_str().unwrap())
+        .args(["analyze", dir.path().to_str().unwrap()])
         .assert()
         .success()
         .stdout(predicate::str::contains("\"nodes\": []"));
@@ -66,7 +71,7 @@ fn empty_directory_produces_empty_graph() {
 #[test]
 fn analyzes_swift_file() {
     grapha()
-        .arg("tests/fixtures/simple.swift")
+        .args(["analyze", "tests/fixtures/simple.swift"])
         .assert()
         .success()
         .stdout(predicate::str::contains("\"kind\": \"struct\""))
@@ -77,7 +82,7 @@ fn analyzes_swift_file() {
 #[test]
 fn invalid_filter_shows_error() {
     grapha()
-        .args(["tests/fixtures/simple.rs", "--filter", "bogus"])
+        .args(["analyze", "tests/fixtures/simple.rs", "--filter", "bogus"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("unknown node kind"));
@@ -86,7 +91,7 @@ fn invalid_filter_shows_error() {
 #[test]
 fn compact_flag_produces_grouped_output() {
     grapha()
-        .args(["tests/fixtures/simple.rs", "--compact"])
+        .args(["analyze", "tests/fixtures/simple.rs", "--compact"])
         .assert()
         .success()
         .stdout(predicate::str::contains("\"files\""))
@@ -97,8 +102,47 @@ fn compact_flag_produces_grouped_output() {
 #[test]
 fn output_contains_version() {
     grapha()
-        .arg("tests/fixtures/simple.rs")
+        .args(["analyze", "tests/fixtures/simple.rs"])
         .assert()
         .success()
         .stdout(predicate::str::contains("\"version\": \"0.1.0\""));
+}
+
+#[test]
+fn index_creates_sqlite_db() {
+    let dir = tempfile::tempdir().unwrap();
+    let store_dir = dir.path().join(".grapha");
+
+    grapha()
+        .args([
+            "index",
+            "tests/fixtures/simple.rs",
+            "--store-dir",
+            store_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("indexed"));
+
+    assert!(store_dir.join("grapha.db").exists());
+}
+
+#[test]
+fn index_json_format() {
+    let dir = tempfile::tempdir().unwrap();
+    let store_dir = dir.path().join(".grapha");
+
+    grapha()
+        .args([
+            "index",
+            "tests/fixtures/simple.rs",
+            "--format",
+            "json",
+            "--store-dir",
+            store_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    assert!(store_dir.join("graph.json").exists());
 }

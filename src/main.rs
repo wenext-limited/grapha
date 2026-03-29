@@ -10,10 +10,10 @@ mod resolve;
 mod search;
 mod store;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::Context;
-use clap::Parser;
+use clap::{Parser, Subcommand};
 
 use extract::LanguageExtractor;
 use extract::rust::RustExtractor;
@@ -26,23 +26,40 @@ use extract::swift::SwiftExtractor;
     about = "Structural code graph for LLM consumption"
 )]
 struct Cli {
-    /// File or directory to analyze
-    path: PathBuf,
-
-    /// Output file (default: stdout)
-    #[arg(short, long)]
-    output: Option<PathBuf>,
-
-    /// Filter node kinds (comma-separated: fn,struct,enum,trait,impl,mod,field,variant)
-    #[arg(long)]
-    filter: Option<String>,
-
-    /// Output in compact grouped format (optimized for LLM consumption)
-    #[arg(long)]
-    compact: bool,
+    #[command(subcommand)]
+    command: Commands,
 }
 
-fn extractor_for_path(path: &std::path::Path) -> Option<Box<dyn LanguageExtractor>> {
+#[derive(Subcommand)]
+enum Commands {
+    /// Analyze source files and output graph
+    Analyze {
+        /// File or directory to analyze
+        path: PathBuf,
+        /// Output file (default: stdout)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// Filter node kinds (comma-separated: fn,struct,enum,trait,impl,mod,field,variant)
+        #[arg(long)]
+        filter: Option<String>,
+        /// Output in compact grouped format (optimized for LLM consumption)
+        #[arg(long)]
+        compact: bool,
+    },
+    /// Index a project into persistent storage
+    Index {
+        /// Project directory to index
+        path: PathBuf,
+        /// Storage format: "json" or "sqlite" (default: sqlite)
+        #[arg(long, default_value = "sqlite")]
+        format: String,
+        /// Storage directory (default: .grapha/ in project root)
+        #[arg(long)]
+        store_dir: Option<PathBuf>,
+    },
+}
+
+fn extractor_for_path(path: &Path) -> Option<Box<dyn LanguageExtractor>> {
     let ext = path.extension()?.to_str()?;
     match ext {
         "rs" => Some(Box::new(RustExtractor)),
@@ -51,12 +68,11 @@ fn extractor_for_path(path: &std::path::Path) -> Option<Box<dyn LanguageExtracto
     }
 }
 
-fn main() -> anyhow::Result<()> {
-    let cli = Cli::parse();
-
+/// Run the extraction pipeline on a path, returning a merged graph.
+fn run_pipeline(path: &Path) -> anyhow::Result<graph::Graph> {
     let all_extensions: &[&str] = &["rs", "swift"];
     let files =
-        discover::discover_files(&cli.path, all_extensions).context("failed to discover files")?;
+        discover::discover_files(path, all_extensions).context("failed to discover files")?;
 
     let mut results = Vec::new();
     for file in &files {
@@ -68,9 +84,8 @@ fn main() -> anyhow::Result<()> {
         let source =
             std::fs::read(file).with_context(|| format!("failed to read {}", file.display()))?;
 
-        // Make path relative to the input path for cleaner IDs
-        let relative = if cli.path.is_dir() {
-            file.strip_prefix(&cli.path).unwrap_or(file)
+        let relative = if path.is_dir() {
+            file.strip_prefix(path).unwrap_or(file)
         } else {
             file.file_name()
                 .map(|n| n.as_ref())
@@ -83,34 +98,81 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
-    let mut graph = merge::merge(results);
+    Ok(merge::merge(results))
+}
 
-    if let Some(ref filter_str) = cli.filter {
-        let kinds = filter::parse_filter(filter_str)?;
-        graph = filter::filter_graph(graph, &kinds);
-    }
+fn main() -> anyhow::Result<()> {
+    let cli = Cli::parse();
 
-    let json = if cli.compact {
-        let pruned = compress::prune::prune(graph, false);
-        let grouped = compress::group::group(&pruned);
-        match &cli.output {
-            Some(_) => serde_json::to_string(&grouped)?,
-            None => serde_json::to_string_pretty(&grouped)?,
-        }
-    } else {
-        match &cli.output {
-            Some(_) => serde_json::to_string(&graph)?,
-            None => serde_json::to_string_pretty(&graph)?,
-        }
-    };
+    match cli.command {
+        Commands::Analyze {
+            path,
+            output,
+            filter,
+            compact,
+        } => {
+            let mut graph = run_pipeline(&path)?;
 
-    match cli.output {
-        Some(path) => {
-            std::fs::write(&path, &json)
-                .with_context(|| format!("failed to write {}", path.display()))?;
-            eprintln!("wrote {}", path.display());
+            if let Some(ref filter_str) = filter {
+                let kinds = filter::parse_filter(filter_str)?;
+                graph = filter::filter_graph(graph, &kinds);
+            }
+
+            let json = if compact {
+                let pruned = compress::prune::prune(graph, false);
+                let grouped = compress::group::group(&pruned);
+                match &output {
+                    Some(_) => serde_json::to_string(&grouped)?,
+                    None => serde_json::to_string_pretty(&grouped)?,
+                }
+            } else {
+                match &output {
+                    Some(_) => serde_json::to_string(&graph)?,
+                    None => serde_json::to_string_pretty(&graph)?,
+                }
+            };
+
+            match output {
+                Some(p) => {
+                    std::fs::write(&p, &json)
+                        .with_context(|| format!("failed to write {}", p.display()))?;
+                    eprintln!("wrote {}", p.display());
+                }
+                None => println!("{json}"),
+            }
         }
-        None => println!("{json}"),
+        Commands::Index {
+            path,
+            format,
+            store_dir,
+        } => {
+            let store_path = store_dir.unwrap_or_else(|| path.join(".grapha"));
+            let graph = run_pipeline(&path)?;
+
+            std::fs::create_dir_all(&store_path)
+                .with_context(|| format!("failed to create store dir {}", store_path.display()))?;
+
+            let s: Box<dyn store::Store> = match format.as_str() {
+                "json" => Box::new(store::json::JsonStore::new(store_path.join("graph.json"))),
+                "sqlite" => Box::new(store::sqlite::SqliteStore::new(
+                    store_path.join("grapha.db"),
+                )),
+                other => anyhow::bail!("unknown store format: {other}"),
+            };
+
+            s.save(&graph)?;
+
+            // Also build search index
+            let search_index_path = store_path.join("search_index");
+            search::build_index(&graph, &search_index_path)?;
+
+            eprintln!(
+                "indexed {} nodes, {} edges → {}",
+                graph.nodes.len(),
+                graph.edges.len(),
+                store_path.display()
+            );
+        }
     }
 
     Ok(())
