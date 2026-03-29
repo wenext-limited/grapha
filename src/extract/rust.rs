@@ -243,6 +243,40 @@ fn walk_node(
         }
         "use_declaration" => {
             if let Ok(use_text) = node.utf8_text(source) {
+                let raw = use_text
+                    .trim_start_matches("use ")
+                    .trim_end_matches(';')
+                    .trim()
+                    .to_string();
+
+                let kind = if raw.starts_with("crate::")
+                    || raw.starts_with("super::")
+                    || raw.starts_with("self::")
+                {
+                    crate::resolve::ImportKind::Relative
+                } else if raw.ends_with("::*") {
+                    crate::resolve::ImportKind::Wildcard
+                } else {
+                    crate::resolve::ImportKind::Named
+                };
+
+                // Extract symbols from grouped imports: use foo::{A, B}
+                let (path, symbols) = if let Some(brace_start) = raw.find('{') {
+                    let base = raw[..brace_start].trim_end_matches("::").to_string();
+                    let inner = raw[brace_start + 1..].trim_end_matches('}').trim();
+                    let syms = inner.split(',').map(|s| s.trim().to_string()).collect();
+                    (base, syms)
+                } else {
+                    (raw.trim_end_matches("::*").to_string(), vec![])
+                };
+
+                result.imports.push(crate::resolve::Import {
+                    path,
+                    symbols,
+                    kind,
+                });
+
+                // Keep the Uses edge for backwards compatibility
                 result.edges.push(Edge {
                     source: file.to_string(),
                     target: use_text.to_string(),
@@ -786,6 +820,28 @@ mod tests {
             "#,
         );
         assert!(result.edges.iter().any(|e| e.kind == EdgeKind::TypeRef));
+    }
+
+    #[test]
+    fn extracts_structured_imports() {
+        let result = extract("use std::collections::HashMap;");
+        assert_eq!(result.imports.len(), 1);
+        assert_eq!(result.imports[0].path, "std::collections::HashMap");
+        assert_eq!(result.imports[0].kind, crate::resolve::ImportKind::Named);
+    }
+
+    #[test]
+    fn extracts_relative_imports() {
+        let result = extract("use crate::graph::Node;");
+        assert_eq!(result.imports.len(), 1);
+        assert_eq!(result.imports[0].kind, crate::resolve::ImportKind::Relative);
+    }
+
+    #[test]
+    fn extracts_glob_imports() {
+        let result = extract("use std::collections::*;");
+        assert_eq!(result.imports.len(), 1);
+        assert_eq!(result.imports[0].kind, crate::resolve::ImportKind::Wildcard);
     }
 
     #[test]
