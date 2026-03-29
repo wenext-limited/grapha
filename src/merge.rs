@@ -54,10 +54,12 @@ mod tests {
         let r1 = ExtractionResult {
             nodes: vec![make_node("a::Foo", "Foo", NodeKind::Struct)],
             edges: vec![],
+            imports: vec![],
         };
         let r2 = ExtractionResult {
             nodes: vec![make_node("b::Bar", "Bar", NodeKind::Struct)],
             edges: vec![],
+            imports: vec![],
         };
         let graph = merge(vec![r1, r2]);
         assert_eq!(graph.nodes.len(), 2);
@@ -73,6 +75,7 @@ mod tests {
                 kind: EdgeKind::Calls,
                 confidence: 1.0,
             }],
+            imports: vec![],
         };
         let graph = merge(vec![r1]);
         assert_eq!(graph.edges.len(), 0);
@@ -91,6 +94,7 @@ mod tests {
                 kind: EdgeKind::Calls,
                 confidence: 1.0,
             }],
+            imports: vec![],
         };
         let graph = merge(vec![r1]);
         assert_eq!(graph.edges.len(), 1);
@@ -106,10 +110,12 @@ mod tests {
                 kind: EdgeKind::Calls,
                 confidence: 1.0,
             }],
+            imports: vec![],
         };
         let r2 = ExtractionResult {
             nodes: vec![make_node("b::helper", "helper", NodeKind::Function)],
             edges: vec![],
+            imports: vec![],
         };
         let graph = merge(vec![r1, r2]);
         assert_eq!(graph.edges.len(), 1);
@@ -125,6 +131,7 @@ mod tests {
                 kind: EdgeKind::Uses,
                 confidence: 1.0,
             }],
+            imports: vec![],
         };
         let graph = merge(vec![r1]);
         assert_eq!(graph.edges.len(), 1);
