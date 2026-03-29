@@ -13,6 +13,8 @@ thiserror = "2"
 tree-sitter = "0.25"
 tree-sitter-rust = "0.23"
 tree-sitter-swift = "0.7"
+rusqlite = { version = "0.34", features = ["bundled"] }
+tantivy = "0.25"
 
 [dev-dependencies]
 assert_cmd = "2"

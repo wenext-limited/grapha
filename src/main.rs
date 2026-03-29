@@ -7,6 +7,7 @@ mod graph;
 mod merge;
 mod query;
 mod resolve;
+mod search;
 mod store;
 
 use std::path::PathBuf;
