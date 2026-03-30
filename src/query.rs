@@ -1,5 +1,8 @@
 pub mod context;
+pub mod entries;
 pub mod impact;
+pub mod reverse;
+pub mod trace;
 
 use serde::Serialize;
 
