@@ -208,6 +208,10 @@ fn emit_contains_edge(parent_id: Option<&str>, child_id: &str, result: &mut Extr
             target: child_id.to_string(),
             kind: EdgeKind::Contains,
             confidence: 1.0,
+            direction: None,
+            operation: None,
+            condition: None,
+            async_boundary: None,
         });
     }
 }
@@ -241,6 +245,10 @@ fn extract_struct_or_class(
         span: make_span(node),
         visibility,
         metadata: HashMap::new(),
+        role: None,
+        signature: None,
+        doc_comment: None,
+        module: None,
     });
 
     // Walk the class_body for nested declarations
@@ -277,6 +285,10 @@ fn extract_enum(
         span: make_span(node),
         visibility,
         metadata: HashMap::new(),
+        role: None,
+        signature: None,
+        doc_comment: None,
+        module: None,
     });
 
     // Extract enum entries from enum_class_body
@@ -311,6 +323,10 @@ fn extract_enum_entries(
                 target: id.clone(),
                 kind: EdgeKind::Contains,
                 confidence: 1.0,
+                direction: None,
+                operation: None,
+                condition: None,
+                async_boundary: None,
             });
 
             result.nodes.push(Node {
@@ -321,6 +337,10 @@ fn extract_enum_entries(
                 span: make_span(child),
                 visibility: Visibility::Public,
                 metadata: HashMap::new(),
+                role: None,
+                signature: None,
+                doc_comment: None,
+                module: None,
             });
         }
     }
@@ -350,6 +370,10 @@ fn extract_extension(
         span: make_span(node),
         visibility: Visibility::Crate,
         metadata: HashMap::new(),
+        role: None,
+        signature: None,
+        doc_comment: None,
+        module: None,
     });
 
     // Walk the class_body for nested declarations
@@ -397,6 +421,10 @@ fn extract_protocol(
         span: make_span(node),
         visibility,
         metadata: HashMap::new(),
+        role: None,
+        signature: None,
+        doc_comment: None,
+        module: None,
     });
 
     // Walk the protocol_body for method declarations
@@ -433,6 +461,10 @@ fn extract_function(
         span: make_span(node),
         visibility,
         metadata: HashMap::new(),
+        role: None,
+        signature: None,
+        doc_comment: None,
+        module: None,
     });
 
     // Walk function body for call expressions
@@ -469,6 +501,10 @@ fn extract_property(
         span: make_span(node),
         visibility,
         metadata: HashMap::new(),
+        role: None,
+        signature: None,
+        doc_comment: None,
+        module: None,
     });
 }
 
@@ -508,6 +544,10 @@ fn extract_typealias(
         span: make_span(node),
         visibility,
         metadata: HashMap::new(),
+        role: None,
+        signature: None,
+        doc_comment: None,
+        module: None,
     });
 }
 
@@ -537,6 +577,10 @@ fn extract_import(
                 target: format!("import {}", path),
                 kind: EdgeKind::Uses,
                 confidence: 0.7,
+                direction: None,
+                operation: None,
+                condition: None,
+                async_boundary: None,
             });
         }
     }
@@ -563,6 +607,10 @@ fn extract_inheritance_edges(
                 target: target_id,
                 kind: EdgeKind::Implements,
                 confidence: 0.9,
+                direction: None,
+                operation: None,
+                condition: None,
+                async_boundary: None,
             });
         }
     }
@@ -586,6 +634,10 @@ fn extract_calls(
                 target: target_id,
                 kind: EdgeKind::Calls,
                 confidence: 0.8,
+                direction: None,
+                operation: None,
+                condition: None,
+                async_boundary: None,
             });
         }
     }

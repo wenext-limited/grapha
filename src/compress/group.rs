@@ -64,7 +64,11 @@ pub fn group(graph: &Graph) -> GroupedGraph {
                     EdgeKind::Implements => implements.push(target_name.to_string()),
                     EdgeKind::Inherits => inherits.push(target_name.to_string()),
                     EdgeKind::TypeRef => type_refs.push(target_name.to_string()),
-                    EdgeKind::Uses => {}
+                    EdgeKind::Uses
+                    | EdgeKind::Reads
+                    | EdgeKind::Writes
+                    | EdgeKind::Publishes
+                    | EdgeKind::Subscribes => {}
                 }
             }
         }
@@ -110,6 +114,10 @@ mod tests {
             },
             visibility: Visibility::Public,
             metadata: HashMap::new(),
+            role: None,
+            signature: None,
+            doc_comment: None,
+            module: None,
         }
     }
 
@@ -142,6 +150,10 @@ mod tests {
                 target: "a.rs::helper".to_string(),
                 kind: EdgeKind::Calls,
                 confidence: 0.9,
+                direction: None,
+                operation: None,
+                condition: None,
+                async_boundary: None,
             }],
         };
         let grouped = group(&graph);

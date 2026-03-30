@@ -90,6 +90,10 @@ mod tests {
                     },
                     visibility: Visibility::Public,
                     metadata: StdHashMap::new(),
+                    role: None,
+                    signature: None,
+                    doc_comment: None,
+                    module: None,
                 },
                 Node {
                     id: "a.rs::helper".into(),
@@ -102,6 +106,10 @@ mod tests {
                     },
                     visibility: Visibility::Public,
                     metadata: StdHashMap::new(),
+                    role: None,
+                    signature: None,
+                    doc_comment: None,
+                    module: None,
                 },
             ],
             edges: vec![Edge {
@@ -109,6 +117,10 @@ mod tests {
                 target: "a.rs::helper".into(),
                 kind: EdgeKind::Calls,
                 confidence: 0.9,
+                direction: None,
+                operation: None,
+                condition: None,
+                async_boundary: None,
             }],
         }
     }

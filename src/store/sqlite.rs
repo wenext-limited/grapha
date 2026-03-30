@@ -187,6 +187,10 @@ impl Store for SqliteStore {
                     },
                     visibility,
                     metadata,
+                    role: None,
+                    signature: None,
+                    doc_comment: None,
+                    module: None,
                 });
             }
             nodes
@@ -213,6 +217,10 @@ impl Store for SqliteStore {
                     target,
                     kind,
                     confidence,
+                    direction: None,
+                    operation: None,
+                    condition: None,
+                    async_boundary: None,
                 });
             }
             edges
@@ -252,12 +260,20 @@ mod tests {
                 },
                 visibility: Visibility::Public,
                 metadata: HashMap::from([("async".to_string(), "true".to_string())]),
+                role: None,
+                signature: None,
+                doc_comment: None,
+                module: None,
             }],
             edges: vec![Edge {
                 source: "test.rs::main".to_string(),
                 target: "test.rs::helper".to_string(),
                 kind: EdgeKind::Calls,
                 confidence: 0.85,
+                direction: None,
+                operation: None,
+                condition: None,
+                async_boundary: None,
             }],
         };
 
@@ -294,6 +310,10 @@ mod tests {
                 },
                 visibility: Visibility::Public,
                 metadata: HashMap::new(),
+                role: None,
+                signature: None,
+                doc_comment: None,
+                module: None,
             }],
             edges: vec![],
         };

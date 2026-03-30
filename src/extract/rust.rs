@@ -47,6 +47,10 @@ fn walk_node(
                         target: graph_node.id.clone(),
                         kind: EdgeKind::Contains,
                         confidence: 1.0,
+                        direction: None,
+                        operation: None,
+                        condition: None,
+                        async_boundary: None,
                     });
                 }
                 let node_id = graph_node.id.clone();
@@ -65,6 +69,10 @@ fn walk_node(
                             target: target_id,
                             kind: EdgeKind::TypeRef,
                             confidence: 0.85,
+                            direction: None,
+                            operation: None,
+                            condition: None,
+                            async_boundary: None,
                         });
                     }
                 }
@@ -86,6 +94,10 @@ fn walk_node(
                         target: graph_node.id.clone(),
                         kind: EdgeKind::Contains,
                         confidence: 1.0,
+                        direction: None,
+                        operation: None,
+                        condition: None,
+                        async_boundary: None,
                     });
                 }
                 let node_id = graph_node.id.clone();
@@ -116,6 +128,10 @@ fn walk_node(
                         target: graph_node.id.clone(),
                         kind: EdgeKind::Contains,
                         confidence: 1.0,
+                        direction: None,
+                        operation: None,
+                        condition: None,
+                        async_boundary: None,
                     });
                 }
                 let node_id = graph_node.id.clone();
@@ -146,6 +162,10 @@ fn walk_node(
                         target: graph_node.id.clone(),
                         kind: EdgeKind::Contains,
                         confidence: 1.0,
+                        direction: None,
+                        operation: None,
+                        condition: None,
+                        async_boundary: None,
                     });
                 }
                 let node_id = graph_node.id.clone();
@@ -164,6 +184,10 @@ fn walk_node(
                                 target: target_id,
                                 kind: EdgeKind::Inherits,
                                 confidence: 0.9,
+                                direction: None,
+                                operation: None,
+                                condition: None,
+                                async_boundary: None,
                             });
                         }
                     }
@@ -182,6 +206,10 @@ fn walk_node(
                         target: graph_node.id.clone(),
                         kind: EdgeKind::Contains,
                         confidence: 1.0,
+                        direction: None,
+                        operation: None,
+                        condition: None,
+                        async_boundary: None,
                     });
                 }
                 let node_id = graph_node.id.clone();
@@ -199,6 +227,10 @@ fn walk_node(
                         target: trait_id,
                         kind: EdgeKind::Implements,
                         confidence: 0.9,
+                        direction: None,
+                        operation: None,
+                        condition: None,
+                        async_boundary: None,
                     });
                 }
 
@@ -219,6 +251,10 @@ fn walk_node(
                         target: graph_node.id.clone(),
                         kind: EdgeKind::Contains,
                         confidence: 1.0,
+                        direction: None,
+                        operation: None,
+                        condition: None,
+                        async_boundary: None,
                     });
                 }
                 let mod_name = graph_node.name.clone();
@@ -274,6 +310,10 @@ fn walk_node(
                     target: use_text.to_string(),
                     kind: EdgeKind::Uses,
                     confidence: 0.7,
+                    direction: None,
+                    operation: None,
+                    condition: None,
+                    async_boundary: None,
                 });
             }
         }
@@ -385,6 +425,10 @@ fn extract_function(
         },
         visibility,
         metadata,
+        role: None,
+        signature: None,
+        doc_comment: None,
+        module: None,
     })
 }
 
@@ -413,6 +457,10 @@ fn extract_named_item(
         },
         visibility,
         metadata: HashMap::new(),
+        role: None,
+        signature: None,
+        doc_comment: None,
+        module: None,
     })
 }
 
@@ -442,6 +490,10 @@ fn extract_impl_item(
         },
         visibility: Visibility::Private,
         metadata: HashMap::new(),
+        role: None,
+        signature: None,
+        doc_comment: None,
+        module: None,
     })
 }
 
@@ -471,6 +523,10 @@ fn extract_struct_fields(
                 target: id.clone(),
                 kind: EdgeKind::Contains,
                 confidence: 1.0,
+                direction: None,
+                operation: None,
+                condition: None,
+                async_boundary: None,
             });
 
             result.nodes.push(Node {
@@ -484,6 +540,10 @@ fn extract_struct_fields(
                 },
                 visibility,
                 metadata: HashMap::new(),
+                role: None,
+                signature: None,
+                doc_comment: None,
+                module: None,
             });
         }
     }
@@ -538,6 +598,10 @@ fn extract_calls(
                     target: target_id,
                     kind: EdgeKind::Calls,
                     confidence: 0.8,
+                    direction: None,
+                    operation: None,
+                    condition: None,
+                    async_boundary: None,
                 });
             }
         }
@@ -575,6 +639,10 @@ fn extract_enum_variants(
                 target: id.clone(),
                 kind: EdgeKind::Contains,
                 confidence: 1.0,
+                direction: None,
+                operation: None,
+                condition: None,
+                async_boundary: None,
             });
 
             result.nodes.push(Node {
@@ -588,6 +656,10 @@ fn extract_enum_variants(
                 },
                 visibility: Visibility::Public,
                 metadata: HashMap::new(),
+                role: None,
+                signature: None,
+                doc_comment: None,
+                module: None,
             });
         }
     }

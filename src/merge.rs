@@ -75,6 +75,10 @@ mod tests {
             },
             visibility: Visibility::Public,
             metadata: HashMap::new(),
+            role: None,
+            signature: None,
+            doc_comment: None,
+            module: None,
         }
     }
 
@@ -103,6 +107,10 @@ mod tests {
                 target: "nonexistent::foo".to_string(),
                 kind: EdgeKind::Calls,
                 confidence: 1.0,
+                direction: None,
+                operation: None,
+                condition: None,
+                async_boundary: None,
             }],
             imports: vec![],
         };
@@ -122,6 +130,10 @@ mod tests {
                 target: "a::helper".to_string(),
                 kind: EdgeKind::Calls,
                 confidence: 1.0,
+                direction: None,
+                operation: None,
+                condition: None,
+                async_boundary: None,
             }],
             imports: vec![],
         };
@@ -138,6 +150,10 @@ mod tests {
                 target: "b::helper".to_string(),
                 kind: EdgeKind::Calls,
                 confidence: 1.0,
+                direction: None,
+                operation: None,
+                condition: None,
+                async_boundary: None,
             }],
             imports: vec![],
         };
@@ -159,6 +175,10 @@ mod tests {
                 target: "use std::collections::HashMap;".to_string(),
                 kind: EdgeKind::Uses,
                 confidence: 1.0,
+                direction: None,
+                operation: None,
+                condition: None,
+                async_boundary: None,
             }],
             imports: vec![],
         };
@@ -175,6 +195,10 @@ mod tests {
                 target: "a.rs::helper".to_string(),
                 kind: EdgeKind::Calls,
                 confidence: 0.8,
+                direction: None,
+                operation: None,
+                condition: None,
+                async_boundary: None,
             }],
             imports: vec![],
         };
