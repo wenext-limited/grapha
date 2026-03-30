@@ -13,6 +13,7 @@ mod progress;
 mod query;
 mod resolve;
 mod search;
+mod serve;
 mod store;
 
 use std::path::{Path, PathBuf};
@@ -103,6 +104,40 @@ enum Commands {
         #[arg(short, long, default_value = ".")]
         path: PathBuf,
     },
+    /// Forward-trace dataflow from an entry point to terminal operations
+    Trace {
+        /// Entry point symbol name or ID
+        entry: String,
+        /// Maximum traversal depth
+        #[arg(long, default_value = "10")]
+        depth: usize,
+        /// Project directory
+        #[arg(short, long, default_value = ".")]
+        path: PathBuf,
+    },
+    /// Reverse query: which entry points are affected by this symbol?
+    Reverse {
+        /// Symbol name or ID
+        symbol: String,
+        /// Project directory
+        #[arg(short, long, default_value = ".")]
+        path: PathBuf,
+    },
+    /// List auto-detected entry points
+    Entries {
+        /// Project directory
+        #[arg(short, long, default_value = ".")]
+        path: PathBuf,
+    },
+    /// Launch web UI for interactive graph exploration
+    Serve {
+        /// Project directory
+        #[arg(short, long, default_value = ".")]
+        path: PathBuf,
+        /// Port to listen on
+        #[arg(long, default_value = "8080")]
+        port: u16,
+    },
 }
 
 fn extractor_for_path(path: &Path) -> Option<Box<dyn LanguageExtractor>> {
@@ -187,13 +222,42 @@ fn run_pipeline(path: &Path, verbose: bool) -> anyhow::Result<graph::Graph> {
     }
 
     let t = Instant::now();
-    let graph = merge::merge(results);
+    let merged = merge::merge(results);
     if verbose {
         progress::done(
             &format!(
                 "merged → {} nodes, {} edges",
-                graph.nodes.len(),
-                graph.edges.len()
+                merged.nodes.len(),
+                merged.edges.len()
+            ),
+            t,
+        );
+    }
+
+    let t = Instant::now();
+    let cfg = config::load_config(path);
+    let classifiers: Vec<Box<dyn classify::Classifier>> = vec![
+        Box::new(classify::toml_rules::TomlRulesClassifier::new(&cfg.classifiers)),
+        Box::new(classify::swift::SwiftClassifier::new()),
+        Box::new(classify::rust::RustClassifier::new()),
+    ];
+    let composite = classify::CompositeClassifier::new(classifiers);
+    let graph = classify::pass::classify_graph(&merged, &composite);
+    if verbose {
+        let terminal_count = graph
+            .nodes
+            .iter()
+            .filter(|n| matches!(n.role, Some(graph::NodeRole::Terminal { .. })))
+            .count();
+        let entry_count = graph
+            .nodes
+            .iter()
+            .filter(|n| matches!(n.role, Some(graph::NodeRole::EntryPoint)))
+            .count();
+        progress::done(
+            &format!(
+                "classified → {} entries, {} terminals",
+                entry_count, terminal_count
             ),
             t,
         );
@@ -325,6 +389,28 @@ fn main() -> anyhow::Result<()> {
             };
             let results = search::search(&index, &q, limit)?;
             println!("{}", serde_json::to_string_pretty(&results)?);
+        }
+        Commands::Trace { entry, depth, path } => {
+            let graph = load_graph(&path)?;
+            let result = query::trace::query_trace(&graph, &entry, depth)
+                .ok_or_else(|| anyhow::anyhow!("entry point not found: {entry}"))?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        }
+        Commands::Reverse { symbol, path } => {
+            let graph = load_graph(&path)?;
+            let result = query::reverse::query_reverse(&graph, &symbol)
+                .ok_or_else(|| anyhow::anyhow!("symbol not found: {symbol}"))?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        }
+        Commands::Entries { path } => {
+            let graph = load_graph(&path)?;
+            let result = query::entries::query_entries(&graph);
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        }
+        Commands::Serve { path, port } => {
+            let graph = load_graph(&path)?;
+            let rt = tokio::runtime::Runtime::new()?;
+            rt.block_on(serve::run(graph, port))?;
         }
     }
 
