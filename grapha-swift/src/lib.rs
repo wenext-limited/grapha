@@ -77,6 +77,33 @@ fn discover_index_store(start_path: &Path) -> Option<PathBuf> {
     None
 }
 
+/// Pre-discover the index store path. Call before starting extraction
+/// to ensure the discovery log appears before the progress bar.
+pub fn init_index_store(project_root: &Path) {
+    INDEX_STORE_PATH.get_or_init(|| {
+        if let Some(store) = discover_index_store(project_root) {
+            return Some(store);
+        }
+        let mut dir = if project_root.is_file() {
+            project_root.parent().map(Path::to_path_buf)
+        } else {
+            Some(project_root.to_path_buf())
+        };
+        while let Some(d) = dir {
+            if let Some(store) = discover_index_store(&d) {
+                return Some(store);
+            }
+            dir = d.parent().map(Path::to_path_buf);
+        }
+        None
+    });
+}
+
+/// Get the discovered index store path, if any.
+pub fn index_store_path() -> Option<&'static Path> {
+    INDEX_STORE_PATH.get().and_then(|p| p.as_deref())
+}
+
 /// Extract Swift source code with waterfall strategy:
 /// 1. Xcode index store (confidence 1.0)
 /// 2. SwiftSyntax bridge (confidence 0.9)
@@ -87,33 +114,12 @@ pub fn extract_swift(
     index_store_path: Option<&Path>,
     project_root: Option<&Path>,
 ) -> anyhow::Result<ExtractionResult> {
-    // Use explicit path or auto-discover from DerivedData
-    let discovered = INDEX_STORE_PATH.get_or_init(|| {
-        // Try project root first, then walk up from file path
-        if let Some(root) = project_root {
-            if let Some(store) = discover_index_store(root) {
-                eprintln!("[grapha] index store:: {}", store.display());
-                return Some(store);
-            }
-        }
-        // Walk up from file path looking for a project directory
-        let mut dir = if file_path.is_file() {
-            file_path.parent().map(Path::to_path_buf)
-        } else {
-            Some(file_path.to_path_buf())
-        };
-        while let Some(d) = dir {
-            if let Some(store) = discover_index_store(&d) {
-                eprintln!("[grapha] index store:: {}", store.display());
-                return Some(store);
-            }
-            dir = d.parent().map(Path::to_path_buf);
-        }
-        eprintln!("[grapha] index store:");
-        None
-    });
-
-    let effective_store = index_store_path.or(discovered.as_deref());
+    // Use explicit path, pre-discovered path, or auto-discover
+    if let Some(root) = project_root {
+        init_index_store(root);
+    }
+    let effective_store = index_store_path
+        .or_else(|| INDEX_STORE_PATH.get().and_then(|p| p.as_deref()));
 
     if let Some(store_path) = effective_store {
         // Index store needs absolute file path for matching

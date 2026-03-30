@@ -20,7 +20,6 @@ use std::time::Instant;
 use anyhow::Context;
 use clap::{Parser, Subcommand};
 
-use grapha_core::extract::LanguageExtractor;
 use store::Store;
 
 #[derive(Parser)]
@@ -173,6 +172,15 @@ fn run_pipeline(path: &Path, verbose: bool) -> anyhow::Result<grapha_core::graph
 
     let abs_root = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let module_map = module::ModuleMap::discover(&abs_root);
+
+    // Pre-discover index store before starting the progress bar
+    let t = Instant::now();
+    grapha_swift::init_index_store(&abs_root);
+    if let Some(store) = grapha_swift::index_store_path() {
+        if verbose {
+            progress::done(&format!("index store: {}", store.display()), t);
+        }
+    }
 
     let t = Instant::now();
     let pb = if verbose && files.len() > 1 {
