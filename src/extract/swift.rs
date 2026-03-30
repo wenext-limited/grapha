@@ -72,7 +72,7 @@ fn walk_node(
         "protocol_declaration" => {
             extract_protocol(node, source, file, module_path, parent_id, result);
         }
-        "function_declaration" => {
+        "function_declaration" | "init_declaration" | "deinit_declaration" => {
             extract_function(node, source, file, module_path, parent_id, result);
         }
         "protocol_function_declaration" => {
@@ -371,8 +371,16 @@ fn extract_function_with_entry_hint(
     observable_parent: bool,
     result: &mut ExtractionResult,
 ) {
-    let Some(name) = simple_identifier_text(node, source) else {
-        return;
+    // init/deinit declarations don't have a simple_identifier name
+    let name = if node.kind() == "init_declaration" {
+        "init".to_string()
+    } else if node.kind() == "deinit_declaration" {
+        "deinit".to_string()
+    } else {
+        let Some(n) = simple_identifier_text(node, source) else {
+            return;
+        };
+        n
     };
     let id = make_id(file, module_path, &name);
     let visibility = extract_visibility(node, source);
@@ -403,11 +411,30 @@ fn extract_function_with_entry_hint(
         module: None,
     });
 
-    // Walk function body for call expressions
+    // Walk function body for call expressions.
+    // init_declaration uses "class_body" or direct children, not "function_body"
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
-        if child.kind() == "function_body" {
+        if matches!(child.kind(), "function_body" | "class_body") {
             extract_calls(child, source, file, module_path, &id, result);
+        }
+    }
+    // Fallback: if no function_body found (e.g., init), scan all children
+    // that aren't parameter lists or modifiers
+    let has_body = {
+        let mut c = node.walk();
+        node.named_children(&mut c)
+            .any(|ch| matches!(ch.kind(), "function_body" | "class_body"))
+    };
+    if !has_body {
+        let mut c = node.walk();
+        for child in node.named_children(&mut c) {
+            if !matches!(
+                child.kind(),
+                "modifiers" | "parameter" | "type_annotation" | "attribute" | "where_clause"
+            ) {
+                extract_calls(child, source, file, module_path, &id, result);
+            }
         }
     }
 }
@@ -588,7 +615,7 @@ fn extract_protocol(
     }
 }
 
-/// Extract function declaration.
+/// Extract function declaration (including init/deinit).
 fn extract_function(
     node: tree_sitter::Node,
     source: &[u8],
@@ -597,8 +624,15 @@ fn extract_function(
     parent_id: Option<&str>,
     result: &mut ExtractionResult,
 ) {
-    let Some(name) = simple_identifier_text(node, source) else {
-        return;
+    let name = if node.kind() == "init_declaration" {
+        "init".to_string()
+    } else if node.kind() == "deinit_declaration" {
+        "deinit".to_string()
+    } else {
+        let Some(n) = simple_identifier_text(node, source) else {
+            return;
+        };
+        n
     };
     let id = make_id(file, module_path, &name);
     let visibility = extract_visibility(node, source);
@@ -621,11 +655,26 @@ fn extract_function(
         module: None,
     });
 
-    // Walk function body for call expressions
+    // Walk function body for call expressions.
+    // init_declaration may not have "function_body" — scan all non-parameter children as fallback.
     let mut cursor = node.walk();
+    let mut found_body = false;
     for child in node.named_children(&mut cursor) {
         if child.kind() == "function_body" {
             extract_calls(child, source, file, module_path, &id, result);
+            found_body = true;
+        }
+    }
+    if !found_body {
+        let mut c = node.walk();
+        for child in node.named_children(&mut c) {
+            if !matches!(
+                child.kind(),
+                "modifiers" | "parameter" | "type_annotation" | "attribute" | "where_clause"
+                    | "simple_identifier" | "type_identifier"
+            ) {
+                extract_calls(child, source, file, module_path, &id, result);
+            }
         }
     }
 }
@@ -936,7 +985,8 @@ fn extract_inheritance_edges(
     }
 }
 
-/// Recursively scan for `call_expression` nodes, emitting Calls edges.
+/// Recursively scan for `call_expression` and `navigation_expression` nodes,
+/// emitting Calls edges for function calls and TypeRef edges for property accesses.
 fn extract_calls(
     node: tree_sitter::Node,
     source: &[u8],
@@ -961,6 +1011,40 @@ fn extract_calls(
             condition,
             async_boundary,
         });
+    }
+
+    // Property access: `foo.bar` generates a navigation_expression.
+    // Emit a Calls edge so that property reads appear in the graph
+    // and impact analysis can trace through them.
+    // Skip if the parent is a call_expression (already handled above as the callee name).
+    if node.kind() == "navigation_expression"
+        && !matches!(node.parent().map(|p| p.kind()), Some("call_expression"))
+    {
+        // The accessed property name is the last navigation_suffix child
+        let mut cursor = node.walk();
+        if let Some(suffix) = node
+            .named_children(&mut cursor)
+            .filter(|c| c.kind() == "navigation_suffix")
+            .last()
+        {
+            if let Some(name_node) = suffix.named_child(0)
+                && let Ok(prop_name) = name_node.utf8_text(source)
+                && !prop_name.is_empty()
+            {
+                let target_id = make_id(file, module_path, prop_name);
+                let condition = find_enclosing_swift_condition(node, source);
+                result.edges.push(Edge {
+                    source: caller_id.to_string(),
+                    target: target_id,
+                    kind: EdgeKind::Calls,
+                    confidence: 0.6,
+                    direction: None,
+                    operation: None,
+                    condition,
+                    async_boundary: None,
+                });
+            }
+        }
     }
 
     // Recurse into all children
