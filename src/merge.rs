@@ -16,14 +16,35 @@ struct NameEntry {
 /// For unresolved targets, cross-file resolution is attempted by matching
 /// the symbol name (last `::` segment) against all known nodes.
 ///
-/// Module-aware confidence scoring:
-/// - Single candidate, same module as source: 0.9x
-/// - Single candidate, different module: 0.8x
-/// - Multiple candidates, same-module match preferred: 0.7x
-/// - Multiple candidates, cross-module: 0.5x
-/// - No matches: edge dropped
+/// Resolution priority:
+/// 1. Same-module candidate (confidence 0.9x)
+/// 2. Imported-module candidate (confidence 0.8x)
+/// 3. Single unambiguous candidate in a different module (confidence 0.7x)
+/// 4. Multiple ambiguous candidates — drop edge (too unreliable)
 pub fn merge(results: Vec<ExtractionResult>) -> Graph {
     let mut graph = Graph::new();
+
+    // Build file → set of imported module names from import statements.
+    // Swift `import Foo` means the file can reference symbols from module "Foo".
+    let mut file_imports: HashMap<String, HashSet<String>> = HashMap::new();
+    for r in &results {
+        for import in &r.imports {
+            // The import source file is the first node's file (all nodes in a result share the same file)
+            if let Some(first_node) = r.nodes.first() {
+                let file_key = first_node.file.to_string_lossy().to_string();
+                // import path is like "import Foundation" — the module name is the path itself
+                let module_name = import
+                    .path
+                    .strip_prefix("import ")
+                    .unwrap_or(&import.path)
+                    .to_string();
+                file_imports
+                    .entry(file_key)
+                    .or_default()
+                    .insert(module_name);
+            }
+        }
+    }
 
     for r in &results {
         graph.nodes.extend(r.nodes.iter().cloned());
@@ -43,11 +64,16 @@ pub fn merge(results: Vec<ExtractionResult>) -> Graph {
             });
     }
 
-    // Build id → module for source lookups
-    let id_to_module: HashMap<&str, Option<&str>> = graph
+    // Build node_id → (module, file) for source lookups
+    let id_to_info: HashMap<&str, (Option<&str>, &str)> = graph
         .nodes
         .iter()
-        .map(|n| (n.id.as_str(), n.module.as_deref()))
+        .map(|n| {
+            (
+                n.id.as_str(),
+                (n.module.as_deref(), n.file.to_str().unwrap_or("")),
+            )
+        })
         .collect();
 
     for r in results {
@@ -62,28 +88,49 @@ pub fn merge(results: Vec<ExtractionResult>) -> Graph {
                         continue;
                     }
 
-                    let source_module = id_to_module.get(edge.source.as_str()).copied().flatten();
+                    let (source_module, source_file) = id_to_info
+                        .get(edge.source.as_str())
+                        .copied()
+                        .unwrap_or((None, ""));
+                    let source_imports = file_imports.get(source_file);
 
                     if candidates.len() == 1 {
                         let candidate = &candidates[0];
-                        let same_module = modules_match(source_module, candidate.module.as_deref());
-                        edge.target = candidate.id.clone();
-                        edge.confidence *= if same_module { 0.9 } else { 0.8 };
-                        graph.edges.push(edge);
-                    } else {
-                        // Multiple candidates — prefer same-module match
-                        let same_module_candidate = candidates
-                            .iter()
-                            .find(|c| modules_match(source_module, c.module.as_deref()));
-
-                        if let Some(candidate) = same_module_candidate {
+                        let same_module =
+                            modules_match(source_module, candidate.module.as_deref());
+                        if same_module {
                             edge.target = candidate.id.clone();
-                            edge.confidence *= 0.7;
+                            edge.confidence *= 0.9;
+                            graph.edges.push(edge);
                         } else {
-                            edge.target = candidates[0].id.clone();
-                            edge.confidence *= 0.5;
+                            // Cross-module single candidate: only keep if the
+                            // source file imports the candidate's module
+                            let imported = source_imports
+                                .and_then(|imports| {
+                                    candidate.module.as_deref().map(|m| imports.contains(m))
+                                })
+                                .unwrap_or(false);
+                            if imported {
+                                edge.target = candidate.id.clone();
+                                edge.confidence *= 0.7;
+                                graph.edges.push(edge);
+                            }
+                            // else: cross-module without import → drop
                         }
-                        graph.edges.push(edge);
+                    } else {
+                        // Multiple candidates — use priority: same-module > imported > drop
+                        let resolved = resolve_candidate(
+                            candidates,
+                            source_module,
+                            source_imports,
+                        );
+
+                        if let Some((candidate_id, factor)) = resolved {
+                            edge.target = candidate_id;
+                            edge.confidence *= factor;
+                            graph.edges.push(edge);
+                        }
+                        // else: ambiguous, drop edge
                     }
                 }
             }
@@ -91,6 +138,41 @@ pub fn merge(results: Vec<ExtractionResult>) -> Graph {
     }
 
     graph
+}
+
+/// Pick the best candidate from multiple matches.
+/// Returns (candidate_id, confidence_factor) or None if too ambiguous.
+fn resolve_candidate(
+    candidates: &[NameEntry],
+    source_module: Option<&str>,
+    source_imports: Option<&HashSet<String>>,
+) -> Option<(String, f64)> {
+    // 1. Same-module candidates
+    let same_module: Vec<&NameEntry> = candidates
+        .iter()
+        .filter(|c| modules_match(source_module, c.module.as_deref()))
+        .collect();
+    if same_module.len() == 1 {
+        return Some((same_module[0].id.clone(), 0.9));
+    }
+
+    // 2. Imported-module candidates
+    if let Some(imports) = source_imports {
+        let imported: Vec<&NameEntry> = candidates
+            .iter()
+            .filter(|c| {
+                c.module
+                    .as_deref()
+                    .is_some_and(|m| imports.contains(m))
+            })
+            .collect();
+        if imported.len() == 1 {
+            return Some((imported[0].id.clone(), 0.8));
+        }
+    }
+
+    // 3. Too ambiguous — drop
+    None
 }
 
 /// Check if two modules match. Two `None` modules are considered matching
@@ -272,11 +354,11 @@ mod tests {
             .find(|e| e.kind == EdgeKind::Calls)
             .expect("should have a call edge");
 
-        // Multiple candidates but same-module match preferred → 0.7x
+        // Multiple candidates but same-module match uniquely preferred → 0.9x
         assert_eq!(call_edge.target, "mod_a::helper");
         assert!(
-            (call_edge.confidence - 0.7).abs() < 0.001,
-            "expected 0.7, got {}",
+            (call_edge.confidence - 0.9).abs() < 0.001,
+            "expected 0.9, got {}",
             call_edge.confidence
         );
     }
@@ -310,18 +392,12 @@ mod tests {
         };
 
         let graph = merge(vec![r1, r2]);
-        let call_edge = graph
-            .edges
-            .iter()
-            .find(|e| e.kind == EdgeKind::Calls)
-            .expect("should have a call edge");
+        let call_edge = graph.edges.iter().find(|e| e.kind == EdgeKind::Calls);
 
-        // Single candidate, different module → 0.8x
-        assert_eq!(call_edge.target, "mod_b::helper");
+        // Single candidate, different module, no import → edge dropped
         assert!(
-            (call_edge.confidence - 0.8).abs() < 0.001,
-            "expected 0.8, got {}",
-            call_edge.confidence
+            call_edge.is_none(),
+            "cross-module edge without import should be dropped"
         );
     }
 
