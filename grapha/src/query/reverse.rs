@@ -33,10 +33,7 @@ fn is_dataflow_edge(kind: EdgeKind) -> bool {
 }
 
 pub fn query_reverse(graph: &Graph, symbol: &str) -> Option<ReverseResult> {
-    let target_node = graph
-        .nodes
-        .iter()
-        .find(|n| n.id == symbol || n.name == symbol)?;
+    let target_node = crate::query::find_node(&graph.nodes, symbol)?;
 
     let node_index: HashMap<&str, &grapha_core::graph::Node> =
         graph.nodes.iter().map(|n| (n.id.as_str(), n)).collect();

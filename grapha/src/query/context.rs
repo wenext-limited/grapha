@@ -5,10 +5,7 @@ use grapha_core::graph::{EdgeKind, Graph};
 use super::{ContextResult, SymbolInfo, SymbolRef};
 
 pub fn query_context(graph: &Graph, query: &str) -> Option<ContextResult> {
-    let node = graph
-        .nodes
-        .iter()
-        .find(|n| n.id == query || n.name == query)?;
+    let node = crate::query::find_node(&graph.nodes, query)?;
 
     let node_index: HashMap<&str, &grapha_core::graph::Node> =
         graph.nodes.iter().map(|n| (n.id.as_str(), n)).collect();

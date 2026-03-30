@@ -73,10 +73,7 @@ fn direction_from_edge(edge_kind: EdgeKind, direction: Option<&FlowDirection>) -
 }
 
 pub fn query_trace(graph: &Graph, entry: &str, max_depth: usize) -> Option<TraceResult> {
-    let entry_node = graph
-        .nodes
-        .iter()
-        .find(|n| n.id == entry || n.name == entry)?;
+    let entry_node = crate::query::find_node(&graph.nodes, entry)?;
 
     let node_index: HashMap<&str, usize> = graph
         .nodes

@@ -16,10 +16,7 @@ pub struct ImpactResult {
 }
 
 pub fn query_impact(graph: &Graph, symbol: &str, max_depth: usize) -> Option<ImpactResult> {
-    let node = graph
-        .nodes
-        .iter()
-        .find(|n| n.id == symbol || n.name == symbol)?;
+    let node = crate::query::find_node(&graph.nodes, symbol)?;
 
     let node_index: HashMap<&str, &grapha_core::graph::Node> =
         graph.nodes.iter().map(|n| (n.id.as_str(), n)).collect();
