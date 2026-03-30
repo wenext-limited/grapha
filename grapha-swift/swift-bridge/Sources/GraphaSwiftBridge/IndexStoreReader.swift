@@ -89,6 +89,20 @@ private final class RelCollector: @unchecked Sendable {
 
 // MARK: - IndexStoreReader
 
+
+// MARK: - Callback State (file-level to avoid captures in @convention(c) callbacks)
+// These are used as temporary storage during synchronous _apply_f iterations.
+nonisolated(unsafe) private var _cbStore: indexstore_t? = nil
+nonisolated(unsafe) private var _cbSearchPath: String = ""
+nonisolated(unsafe) private var _cbSearchFileName: String = ""
+nonisolated(unsafe) private var _cbMatchedUnit: String? = nil
+nonisolated(unsafe) private var _cbMatchedModule: String? = nil
+nonisolated(unsafe) private var _cbRecordName: String? = nil
+nonisolated(unsafe) private var _cbCollector: OccCollector? = nil
+nonisolated(unsafe) private var _cbRelEdges: [ExtractedEdge] = []
+nonisolated(unsafe) private var _cbRelSymbolUSR: String = ""
+nonisolated(unsafe) private var _cbRelRoles: UInt64 = 0
+
 final class IndexStoreReader: @unchecked Sendable {
     private let store: indexstore_t
 
@@ -124,40 +138,34 @@ final class IndexStoreReader: @unchecked Sendable {
     // MARK: - Unit Discovery
 
     private func findUnit(forFile path: String) -> (unitName: String, module: String?)? {
-        let ctx = UnitCollector()
-        let ptr = Unmanaged.passUnretained(ctx).toOpaque()
-
+        _cbStore = store
+        _cbSearchPath = path
+        _cbSearchFileName = (path as NSString).lastPathComponent
+        _cbMatchedUnit = nil
+        _cbMatchedModule = nil
+        
         let cb: @convention(c) (UnsafeMutableRawPointer?, UnsafePointer<CChar>?, Int) -> Bool = {
-            raw, data, len in
-            guard let raw, let data else { return true }
-            let c = Unmanaged<UnitCollector>.fromOpaque(raw).takeUnretainedValue()
-            let buf = UnsafeRawBufferPointer(start: data, count: len)
-            if let s = String(bytes: buf, encoding: .utf8) {
-                c.names.append(s)
+            _, data, len in
+            guard let data, let s = _cbStore else { return true }
+            let unitName = String(decoding: UnsafeRawBufferPointer(start: data, count: len), as: UTF8.self)
+            guard let reader = unitName.withCString({ indexstore_unit_reader_create(s, $0, nil) }) else { return true }
+            defer { indexstore_unit_reader_dispose(reader) }
+            
+            let mainFile = str(indexstore_unit_reader_get_main_file(reader))
+            if mainFile == _cbSearchPath || mainFile.hasSuffix("/" + _cbSearchFileName) {
+                let mod = str(indexstore_unit_reader_get_module_name(reader))
+                _cbMatchedUnit = unitName
+                _cbMatchedModule = mod.isEmpty ? nil : mod
+                return false
             }
             return true
         }
-
-        _ = indexstore_store_units_apply_f(store, 0, ptr, cb)
-
-        let fileName = (path as NSString).lastPathComponent
-
-        for name in ctx.names {
-            guard let reader = name.withCString({
-                indexstore_unit_reader_create(store, $0, nil)
-            }) else { continue }
-            defer { indexstore_unit_reader_dispose(reader) }
-
-            let mainFile = str(indexstore_unit_reader_get_main_file(reader))
-            if mainFile == path || mainFile.hasSuffix("/" + fileName) {
-                let mod = str(indexstore_unit_reader_get_module_name(reader))
-                return (name, mod.isEmpty ? nil : mod)
-            }
-        }
-
-        return nil
+        
+        _ = indexstore_store_units_apply_f(store, 0, nil, cb)
+        
+        guard let unit = _cbMatchedUnit else { return nil }
+        return (unit, _cbMatchedModule)
     }
-
     // MARK: - Record Discovery
 
     private func findRecordName(inUnit unitName: String) -> String? {
@@ -168,26 +176,22 @@ final class IndexStoreReader: @unchecked Sendable {
         }
         defer { indexstore_unit_reader_dispose(reader) }
 
-        let ctx = DepCollector()
-        let ptr = Unmanaged.passUnretained(ctx).toOpaque()
-
+        _cbRecordName = nil
+        
         let cb: @convention(c) (UnsafeMutableRawPointer?, indexstore_unit_dependency_t?) -> Bool = {
-            raw, dep in
-            guard let raw, let dep else { return true }
-            let c = Unmanaged<DepCollector>.fromOpaque(raw).takeUnretainedValue()
-            // kind 1 = record dependency
-            if indexstore_unit_dependency_get_kind(dep) == 1 {
+            _, dep in
+            guard let dep else { return true }
+            if indexstore_unit_dependency_get_kind(dep) == 2 {
                 let name = str(indexstore_unit_dependency_get_name(dep))
                 if !name.isEmpty {
-                    c.recordName = name
-                    return false // found it, stop
+                    _cbRecordName = name
                 }
             }
             return true
         }
 
-        _ = indexstore_unit_reader_dependencies_apply_f(reader, ptr, cb)
-        return ctx.recordName
+        _ = indexstore_unit_reader_dependencies_apply_f(reader, nil, cb)
+        return _cbRecordName
     }
 
     // MARK: - Occurrence Reading
@@ -206,17 +210,17 @@ final class IndexStoreReader: @unchecked Sendable {
         }
         defer { indexstore_record_reader_dispose(reader) }
 
-        let ptr = Unmanaged.passUnretained(collector).toOpaque()
+        _cbCollector = collector
 
         let cb: @convention(c) (UnsafeMutableRawPointer?, indexstore_occurrence_t?) -> Bool = {
-            raw, occ in
-            guard let raw, let occ else { return true }
-            let c = Unmanaged<OccCollector>.fromOpaque(raw).takeUnretainedValue()
+            _, occ in
+            guard let occ, let c = _cbCollector else { return true }
             processOccurrence(collector: c, occ: occ)
             return true
         }
 
-        _ = indexstore_record_reader_occurrences_apply_f(reader, ptr, cb)
+        _ = indexstore_record_reader_occurrences_apply_f(reader, nil, cb)
+        _cbCollector = nil
         return collector
     }
 }
@@ -255,49 +259,49 @@ private func extractRelationEdges(
     symbolUSR: String,
     roles: UInt64
 ) {
-    let ctx = RelCollector(symbolUSR: symbolUSR, roles: roles)
-    let ptr = Unmanaged.passUnretained(ctx).toOpaque()
+    _cbRelEdges = []
+    _cbRelSymbolUSR = symbolUSR
+    _cbRelRoles = roles
 
     let cb: @convention(c) (UnsafeMutableRawPointer?, indexstore_symbol_relation_t?) -> Bool = {
-        raw, rel in
-        guard let raw, let rel else { return true }
-        let ctx = Unmanaged<RelCollector>.fromOpaque(raw).takeUnretainedValue()
+        _, rel in
+        guard let rel else { return true }
         let relSym = indexstore_symbol_relation_get_symbol(rel)!
         let relUSR = str(indexstore_symbol_get_usr(relSym))
         guard !relUSR.isEmpty else { return true }
 
         let relRoles = indexstore_symbol_relation_get_roles(rel)
-        let combinedRoles = ctx.roles | relRoles
+        let combinedRoles = _cbRelRoles | relRoles
 
         if (combinedRoles & Roles.call) != 0 {
-            ctx.edges.append(ExtractedEdge(
-                source: relUSR, target: ctx.symbolUSR,
+            _cbRelEdges.append(ExtractedEdge(
+                source: relUSR, target: _cbRelSymbolUSR,
                 kind: "calls", confidence: 1.0
             ))
         } else if (combinedRoles & Roles.containedBy) != 0 {
-            ctx.edges.append(ExtractedEdge(
-                source: relUSR, target: ctx.symbolUSR,
+            _cbRelEdges.append(ExtractedEdge(
+                source: relUSR, target: _cbRelSymbolUSR,
                 kind: "contains", confidence: 1.0
             ))
         }
 
         if (combinedRoles & Roles.baseOf) != 0 {
-            ctx.edges.append(ExtractedEdge(
-                source: ctx.symbolUSR, target: relUSR,
+            _cbRelEdges.append(ExtractedEdge(
+                source: _cbRelSymbolUSR, target: relUSR,
                 kind: "inherits", confidence: 1.0
             ))
         }
 
         if (combinedRoles & Roles.conformsTo) != 0 {
-            ctx.edges.append(ExtractedEdge(
-                source: ctx.symbolUSR, target: relUSR,
+            _cbRelEdges.append(ExtractedEdge(
+                source: _cbRelSymbolUSR, target: relUSR,
                 kind: "implements", confidence: 1.0
             ))
         }
 
         if (combinedRoles & Roles.overrideOf) != 0 {
-            ctx.edges.append(ExtractedEdge(
-                source: ctx.symbolUSR, target: relUSR,
+            _cbRelEdges.append(ExtractedEdge(
+                source: _cbRelSymbolUSR, target: relUSR,
                 kind: "implements", confidence: 0.9
             ))
         }
@@ -308,8 +312,8 @@ private func extractRelationEdges(
             && (combinedRoles & Roles.baseOf) == 0
             && (combinedRoles & Roles.conformsTo) == 0
         {
-            ctx.edges.append(ExtractedEdge(
-                source: ctx.symbolUSR, target: relUSR,
+            _cbRelEdges.append(ExtractedEdge(
+                source: _cbRelSymbolUSR, target: relUSR,
                 kind: "type_ref", confidence: 0.9
             ))
         }
@@ -317,8 +321,8 @@ private func extractRelationEdges(
         return true
     }
 
-    _ = indexstore_occurrence_relations_apply_f(occ, ptr, cb)
-    c.edges.append(contentsOf: ctx.edges)
+    _ = indexstore_occurrence_relations_apply_f(occ, nil, cb)
+    c.edges.append(contentsOf: _cbRelEdges)
 }
 
 // MARK: - Symbol Kind Mapping
