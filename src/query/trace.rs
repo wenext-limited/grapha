@@ -123,33 +123,33 @@ pub fn query_trace(graph: &Graph, entry: &str, max_depth: usize) -> Option<Trace
         }
 
         // Check if current node is a terminal (but not the entry itself)
-        if frame.path.len() > 1 {
-            if let Some(&ni) = node_index.get(frame.node_id) {
-                let node = &graph.nodes[ni];
-                if let Some(NodeRole::Terminal { kind }) = &node.role {
-                    // Determine direction from the last edge that led here
-                    let last_edge_direction = graph.edges.iter().find(|e| {
-                        e.target == frame.node_id && is_dataflow_edge(e.kind)
-                    });
-                    let direction = last_edge_direction
-                        .map(|e| direction_from_edge(e.kind, e.direction.as_ref()))
-                        .unwrap_or_else(|| "unknown".to_string());
-                    let operation = last_edge_direction
-                        .and_then(|e| e.operation.clone())
-                        .unwrap_or_else(|| "unknown".to_string());
+        if frame.path.len() > 1
+            && let Some(&ni) = node_index.get(frame.node_id)
+        {
+            let node = &graph.nodes[ni];
+            if let Some(NodeRole::Terminal { kind }) = &node.role {
+                // Determine direction from the last edge that led here
+                let last_edge_direction = graph.edges.iter().find(|e| {
+                    e.target == frame.node_id && is_dataflow_edge(e.kind)
+                });
+                let direction = last_edge_direction
+                    .map(|e| direction_from_edge(e.kind, e.direction.as_ref()))
+                    .unwrap_or_else(|| "unknown".to_string());
+                let operation = last_edge_direction
+                    .and_then(|e| e.operation.clone())
+                    .unwrap_or_else(|| "unknown".to_string());
 
-                    flows.push(Flow {
-                        path: frame.path,
-                        terminal: Some(TerminalInfo {
-                            kind: terminal_kind_to_string(kind),
-                            operation,
-                            direction,
-                        }),
-                        conditions: frame.conditions,
-                        async_boundaries: frame.async_boundaries,
-                    });
-                    continue;
-                }
+                flows.push(Flow {
+                    path: frame.path,
+                    terminal: Some(TerminalInfo {
+                        kind: terminal_kind_to_string(kind),
+                        operation,
+                        direction,
+                    }),
+                    conditions: frame.conditions,
+                    async_boundaries: frame.async_boundaries,
+                });
+                continue;
             }
         }
 
