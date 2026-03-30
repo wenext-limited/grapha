@@ -55,7 +55,7 @@ fn output_to_file() {
     let content = std::fs::read_to_string(&output).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
     assert_eq!(parsed["version"], "0.1.0");
-    assert!(parsed["nodes"].as_array().unwrap().len() > 0);
+    assert!(!parsed["nodes"].as_array().unwrap().is_empty());
 }
 
 #[test]
