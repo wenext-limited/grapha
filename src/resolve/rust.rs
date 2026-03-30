@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use super::Import;
 
 /// Resolve a Rust import path to candidate file paths relative to project root.
+#[allow(dead_code)]
 pub fn resolve_rust_import(import: &Import, importer_file: &Path) -> Vec<PathBuf> {
     let path = &import.path;
     if path.starts_with("crate::") {

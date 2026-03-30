@@ -5,6 +5,7 @@ use rusqlite::Connection;
 use crate::graph::{Edge, EdgeKind, Graph, Node, NodeKind, Span, Visibility};
 use crate::store::Store;
 
+#[allow(dead_code)]
 const SCHEMA_VERSION: &str = "1";
 
 pub struct SqliteStore {
