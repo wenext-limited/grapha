@@ -118,8 +118,8 @@ private func loadFnTable(from lib: UnsafeMutableRawPointer) -> FnTable? {
         let symGetName: SymGetStringFn = sym("indexstore_symbol_get_name"),
         let symGetUSR: SymGetStringFn = sym("indexstore_symbol_get_usr"),
         let symGetKind: SymGetKindFn = sym("indexstore_symbol_get_kind"),
-        let relGetSymbol: OccGetSymbolFn = sym("indexstore_relation_get_symbol"),
-        let relGetRoles: OccGetRolesFn = sym("indexstore_relation_get_roles"),
+        let relGetSymbol: OccGetSymbolFn = sym("indexstore_symbol_relation_get_symbol"),
+        let relGetRoles: OccGetRolesFn = sym("indexstore_symbol_relation_get_roles"),
         let unitsApply: UnitsApplyFn = sym("indexstore_store_units_apply_f"),
         let depsApply: DepsApplyFn = sym("indexstore_unit_reader_dependencies_apply_f"),
         let occApply: OccApplyFn = sym("indexstore_record_reader_occurrences_apply_f"),
@@ -199,13 +199,25 @@ final class IndexStoreReader: @unchecked Sendable {
     init?(storePath: String) {
         let dylibPath = "/Applications/Xcode.app/Contents/Developer/Toolchains/"
             + "XcodeDefault.xctoolchain/usr/lib/libIndexStore.dylib"
-
-        guard let lib = dlopen(dylibPath, RTLD_LAZY) else { return nil }
+        guard let lib = dlopen(dylibPath, RTLD_LAZY) else {
+            let err = String(cString: dlerror())
+            return nil
+        }
         guard let fn = loadFnTable(from: lib) else {
             dlclose(lib)
             return nil
         }
-        guard let store = storePath.withCString({ fn.storeCreate($0, nil) }) else {
+        var errPtr: OpaquePointer?
+        guard let store = storePath.withCString({ fn.storeCreate($0, &errPtr) }) else {
+            if let errPtr {
+                // Try to get error description if we have the function
+                if let errDescSym = dlsym(lib, "indexstore_error_get_description") {
+                    typealias ErrDescFn = @convention(c) (OpaquePointer) -> UnsafePointer<CChar>
+                    let getDesc = unsafeBitCast(errDescSym, to: ErrDescFn.self)
+                    let desc = String(cString: getDesc(errPtr))
+                }
+            } else {
+            }
             dlclose(lib)
             return nil
         }

@@ -16,7 +16,9 @@ public func indexstoreExtract(
 ) -> UnsafePointer<CChar>? {
     let reader = Unmanaged<IndexStoreReader>.fromOpaque(handle).takeUnretainedValue()
     let file = String(cString: filePath)
-    guard let json = reader.extractFile(file) else { return nil }
+    guard let json = reader.extractFile(file) else {
+        return nil
+    }
     let cStr = strdup(json)
     return cStr.map { UnsafePointer($0) }
 }
