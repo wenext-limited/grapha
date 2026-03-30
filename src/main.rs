@@ -1,5 +1,7 @@
 mod changes;
+mod classify;
 mod compress;
+mod config;
 mod discover;
 mod error;
 mod extract;
