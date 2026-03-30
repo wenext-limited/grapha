@@ -677,7 +677,6 @@ dependencies = [
  "tower-http",
  "tree-sitter",
  "tree-sitter-rust",
- "tree-sitter-swift",
  "urlencoding",
 ]
 
@@ -694,6 +693,15 @@ dependencies = [
 [[package]]
 name = "grapha-swift"
 version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "grapha-core",
+ "regex",
+ "serde",
+ "serde_json",
+ "tree-sitter",
+ "tree-sitter-swift",
+]
 
 [[package]]
 name = "hashbrown"

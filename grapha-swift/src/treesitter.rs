@@ -5,7 +5,7 @@ use tree_sitter::Parser;
 
 use grapha_core::graph::{Edge, EdgeKind, Node, NodeKind, NodeRole, Span, Visibility};
 
-use super::{ExtractionResult, LanguageExtractor};
+use grapha_core::{ExtractionResult, LanguageExtractor};
 
 pub struct SwiftExtractor;
 

@@ -22,7 +22,7 @@ use clap::{Parser, Subcommand};
 
 use grapha_core::extract::LanguageExtractor;
 use extract::rust::RustExtractor;
-use extract::swift::SwiftExtractor;
+use grapha_swift::SwiftExtractor;
 use store::Store;
 
 #[derive(Parser)]
