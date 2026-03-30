@@ -18,6 +18,12 @@ pub struct SymbolSummary {
     pub name: String,
     pub kind: NodeKind,
     pub span: [usize; 2],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role: Option<crate::graph::NodeRole>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub module: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub members: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -28,6 +34,10 @@ pub struct SymbolSummary {
     pub inherits: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub type_refs: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub reads: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub writes: Vec<String>,
 }
 
 pub fn group(graph: &Graph) -> GroupedGraph {
@@ -51,6 +61,8 @@ pub fn group(graph: &Graph) -> GroupedGraph {
         let mut implements = Vec::new();
         let mut inherits = Vec::new();
         let mut type_refs = Vec::new();
+        let mut reads = Vec::new();
+        let mut writes = Vec::new();
 
         if let Some(edges) = edges {
             for edge in edges {
@@ -64,6 +76,10 @@ pub fn group(graph: &Graph) -> GroupedGraph {
                     EdgeKind::Implements => implements.push(target_name.to_string()),
                     EdgeKind::Inherits => inherits.push(target_name.to_string()),
                     EdgeKind::TypeRef => type_refs.push(target_name.to_string()),
+                    EdgeKind::Reads => reads.push(target_name.to_string()),
+                    EdgeKind::Writes => writes.push(target_name.to_string()),
+                    EdgeKind::Publishes => writes.push(format!("publish:{target_name}")),
+                    EdgeKind::Subscribes => reads.push(format!("subscribe:{target_name}")),
                     EdgeKind::Uses => {}
                 }
             }
@@ -74,11 +90,16 @@ pub fn group(graph: &Graph) -> GroupedGraph {
             name: node.name.clone(),
             kind: node.kind,
             span: [node.span.start[0], node.span.end[0]],
+            role: node.role.clone(),
+            signature: node.signature.clone(),
+            module: node.module.clone(),
             members,
             calls,
             implements,
             inherits,
             type_refs,
+            reads,
+            writes,
         });
     }
 
@@ -110,6 +131,10 @@ mod tests {
             },
             visibility: Visibility::Public,
             metadata: HashMap::new(),
+            role: None,
+            signature: None,
+            doc_comment: None,
+            module: None,
         }
     }
 
@@ -142,12 +167,86 @@ mod tests {
                 target: "a.rs::helper".to_string(),
                 kind: EdgeKind::Calls,
                 confidence: 0.9,
+                direction: None,
+                operation: None,
+                condition: None,
+                async_boundary: None,
             }],
         };
         let grouped = group(&graph);
         let file = &grouped.files["a.rs"];
         let main_sym = file.symbols.iter().find(|s| s.name == "main").unwrap();
         assert_eq!(main_sym.calls, vec!["helper"]);
+    }
+
+    #[test]
+    fn grouped_output_includes_role_and_signature() {
+        let graph = Graph {
+            version: "0.1.0".to_string(),
+            nodes: vec![{
+                let mut n = make_node("a.rs::main", "main", NodeKind::Function, "a.rs", 0);
+                n.role = Some(crate::graph::NodeRole::EntryPoint);
+                n.signature = Some("fn main()".to_string());
+                n.module = Some("app".to_string());
+                n
+            }],
+            edges: vec![],
+        };
+        let grouped = group(&graph);
+        let json = serde_json::to_string(&grouped).unwrap();
+        assert!(json.contains("entry_point"));
+        assert!(json.contains("fn main()"));
+        assert!(json.contains("app"));
+    }
+
+    #[test]
+    fn grouped_output_includes_reads_and_writes() {
+        let graph = Graph {
+            version: "0.1.0".to_string(),
+            nodes: vec![
+                make_node("a.rs::handler", "handler", NodeKind::Function, "a.rs", 0),
+                make_node("a.rs::db", "db", NodeKind::Function, "a.rs", 10),
+                make_node("a.rs::cache", "cache", NodeKind::Function, "a.rs", 20),
+                make_node("a.rs::topic", "topic", NodeKind::Function, "a.rs", 30),
+            ],
+            edges: vec![
+                Edge {
+                    source: "a.rs::handler".to_string(),
+                    target: "a.rs::db".to_string(),
+                    kind: EdgeKind::Reads,
+                    confidence: 0.9,
+                    direction: None,
+                    operation: None,
+                    condition: None,
+                    async_boundary: None,
+                },
+                Edge {
+                    source: "a.rs::handler".to_string(),
+                    target: "a.rs::cache".to_string(),
+                    kind: EdgeKind::Writes,
+                    confidence: 0.9,
+                    direction: None,
+                    operation: None,
+                    condition: None,
+                    async_boundary: None,
+                },
+                Edge {
+                    source: "a.rs::handler".to_string(),
+                    target: "a.rs::topic".to_string(),
+                    kind: EdgeKind::Publishes,
+                    confidence: 0.9,
+                    direction: None,
+                    operation: None,
+                    condition: None,
+                    async_boundary: None,
+                },
+            ],
+        };
+        let grouped = group(&graph);
+        let file = &grouped.files["a.rs"];
+        let handler = file.symbols.iter().find(|s| s.name == "handler").unwrap();
+        assert_eq!(handler.reads, vec!["db"]);
+        assert_eq!(handler.writes, vec!["cache", "publish:topic"]);
     }
 
     #[test]

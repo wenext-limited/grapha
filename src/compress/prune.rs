@@ -62,6 +62,10 @@ mod tests {
             },
             visibility: vis,
             metadata: HashMap::new(),
+            role: None,
+            signature: None,
+            doc_comment: None,
+            module: None,
         }
     }
 
@@ -79,12 +83,20 @@ mod tests {
                     target: "b".into(),
                     kind: EdgeKind::Contains,
                     confidence: 1.0,
+                    direction: None,
+                    operation: None,
+                    condition: None,
+                    async_boundary: None,
                 },
                 Edge {
                     source: "b".into(),
                     target: "a".into(),
                     kind: EdgeKind::Calls,
                     confidence: 0.8,
+                    direction: None,
+                    operation: None,
+                    condition: None,
+                    async_boundary: None,
                 },
             ],
         };
@@ -103,6 +115,10 @@ mod tests {
                 target: "use std::collections::HashMap;".into(),
                 kind: EdgeKind::Uses,
                 confidence: 0.7,
+                direction: None,
+                operation: None,
+                condition: None,
+                async_boundary: None,
             }],
         };
         let pruned = prune(graph, true);

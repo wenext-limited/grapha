@@ -17,6 +17,12 @@ git2 = { version = "0.20", default-features = false }
 rusqlite = { version = "0.34", features = ["bundled"] }
 tantivy = "0.25"
 indicatif = "0.17"
+toml = "0.8"
+regex = "1"
+axum = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
+tower-http = { version = "0.6", features = ["cors"] }
+urlencoding = "2"
 
 [dev-dependencies]
 assert_cmd = "2"

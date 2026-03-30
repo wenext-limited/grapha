@@ -75,6 +75,10 @@ mod tests {
             },
             visibility: Visibility::Public,
             metadata: HashMap::new(),
+            role: None,
+            signature: None,
+            doc_comment: None,
+            module: None,
         }
     }
 
@@ -124,12 +128,20 @@ mod tests {
                     target: "b".to_string(),
                     kind: EdgeKind::TypeRef,
                     confidence: 1.0,
+                    direction: None,
+                    operation: None,
+                    condition: None,
+                    async_boundary: None,
                 },
                 Edge {
                     source: "a".to_string(),
                     target: "a".to_string(),
                     kind: EdgeKind::Calls,
                     confidence: 1.0,
+                    direction: None,
+                    operation: None,
+                    condition: None,
+                    async_boundary: None,
                 },
             ],
         };

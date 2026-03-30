@@ -119,6 +119,10 @@ mod tests {
             },
             visibility: Visibility::Public,
             metadata: HashMap::new(),
+            role: None,
+            signature: None,
+            doc_comment: None,
+            module: None,
         };
         Graph {
             version: "0.1.0".to_string(),
