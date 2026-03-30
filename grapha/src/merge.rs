@@ -95,7 +95,10 @@ pub fn merge(results: Vec<ExtractionResult>) -> Graph {
     let all_edges: Vec<_> = results.into_iter().flat_map(|r| r.edges).collect();
 
     for mut edge in all_edges {
-        if node_ids.contains(edge.target.as_str()) || edge.kind == EdgeKind::Uses {
+        if node_ids.contains(edge.target.as_str())
+            || edge.kind == EdgeKind::Uses
+            || edge.kind == EdgeKind::Implements
+        {
             graph.edges.push(edge);
         } else {
             let target_name = edge.target.rsplit("::").next().unwrap_or(&edge.target);

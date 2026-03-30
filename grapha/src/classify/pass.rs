@@ -49,16 +49,42 @@ pub fn classify_graph(graph: &Graph, classifier: &CompositeClassifier) -> Graph 
         })
         .collect();
 
+    // Detect entry points from protocol conformances (index store data)
+    let mut entry_point_nodes: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    // Detect entry points from protocol conformances (works for index store USR-based data)
+    // SwiftUI View body, App body, Observable/ObservableObject public methods
+    let entry_patterns: &[&str] = &[
+        "SwiftUI",          // SwiftUI.View, SwiftUI.App conformances
+        "ObservableObjectP", // Combine.ObservableObject
+        "10ObservableP",    // Observation.Observable (@Observable)
+    ];
+
+    for edge in &graph.edges {
+        if edge.kind == EdgeKind::Implements
+            && entry_patterns.iter().any(|p| edge.target.contains(p))
+        {
+            entry_point_nodes.insert(edge.source.clone());
+        }
+    }
+
+    // For tree-sitter data: fn main, #[test], View.body are already detected by extractors
+
     let new_nodes: Vec<_> = graph
         .nodes
         .iter()
-        .map(|node| match terminal_nodes.get(&node.id) {
-            Some(kind) => {
+        .map(|node| {
+            if let Some(kind) = terminal_nodes.get(&node.id) {
                 let mut new_node = node.clone();
                 new_node.role = Some(NodeRole::Terminal { kind: *kind });
                 new_node
+            } else if entry_point_nodes.contains(&node.id) && node.role.is_none() {
+                let mut new_node = node.clone();
+                new_node.role = Some(NodeRole::EntryPoint);
+                new_node
+            } else {
+                node.clone()
             }
-            None => node.clone(),
         })
         .collect();
 
