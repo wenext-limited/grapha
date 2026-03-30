@@ -6,12 +6,14 @@ mod extract;
 mod filter;
 mod graph;
 mod merge;
+mod progress;
 mod query;
 mod resolve;
 mod search;
 mod store;
 
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
@@ -110,12 +112,26 @@ fn extractor_for_path(path: &Path) -> Option<Box<dyn LanguageExtractor>> {
 }
 
 /// Run the extraction pipeline on a path, returning a merged graph.
-fn run_pipeline(path: &Path) -> anyhow::Result<graph::Graph> {
+fn run_pipeline(path: &Path, verbose: bool) -> anyhow::Result<graph::Graph> {
+    let t = Instant::now();
+
     let all_extensions: &[&str] = &["rs", "swift"];
     let files =
         discover::discover_files(path, all_extensions).context("failed to discover files")?;
 
+    if verbose {
+        progress::done(&format!("discovered {} files", files.len()), t);
+    }
+
+    let t = Instant::now();
+    let pb = if verbose && files.len() > 1 {
+        Some(progress::bar(files.len() as u64, "extracting"))
+    } else {
+        None
+    };
+
     let mut results = Vec::new();
+    let mut skipped = 0usize;
     for file in &files {
         let extractor = match extractor_for_path(file) {
             Some(e) => e,
@@ -135,11 +151,55 @@ fn run_pipeline(path: &Path) -> anyhow::Result<graph::Graph> {
 
         match extractor.extract(&source, relative) {
             Ok(result) => results.push(result),
-            Err(e) => eprintln!("warning: skipping {}: {e}", file.display()),
+            Err(e) => {
+                skipped += 1;
+                if verbose {
+                    if let Some(ref pb) = pb {
+                        pb.suspend(|| {
+                            eprintln!("  \x1b[33m!\x1b[0m skipping {}: {e}", file.display())
+                        });
+                    } else {
+                        eprintln!("  \x1b[33m!\x1b[0m skipping {}: {e}", file.display());
+                    }
+                }
+            }
+        }
+
+        if let Some(ref pb) = pb {
+            pb.inc(1);
         }
     }
 
-    Ok(merge::merge(results))
+    if let Some(pb) = pb {
+        pb.finish_and_clear();
+    }
+
+    if verbose {
+        let msg = if skipped > 0 {
+            format!("extracted {} files ({} skipped)", results.len(), skipped)
+        } else {
+            format!("extracted {} files", results.len())
+        };
+        progress::done(&msg, t);
+    }
+
+    let t = Instant::now();
+    let graph = merge::merge(results);
+    if verbose {
+        progress::done(
+            &format!("merged → {} nodes, {} edges", graph.nodes.len(), graph.edges.len()),
+            t,
+        );
+    }
+
+    Ok(graph)
+}
+
+fn load_graph(path: &Path) -> anyhow::Result<graph::Graph> {
+    let db_path = path.join(".grapha/grapha.db");
+    let s = store::sqlite::SqliteStore::new(db_path);
+    s.load()
+        .context("no index found — run `grapha index` first")
 }
 
 fn main() -> anyhow::Result<()> {
@@ -152,7 +212,9 @@ fn main() -> anyhow::Result<()> {
             filter,
             compact,
         } => {
-            let mut graph = run_pipeline(&path)?;
+            // verbose when writing to file (stdout is for JSON)
+            let verbose = output.is_some();
+            let mut graph = run_pipeline(&path, verbose)?;
 
             if let Some(ref filter_str) = filter {
                 let kinds = filter::parse_filter(filter_str)?;
@@ -177,7 +239,7 @@ fn main() -> anyhow::Result<()> {
                 Some(p) => {
                     std::fs::write(&p, &json)
                         .with_context(|| format!("failed to write {}", p.display()))?;
-                    eprintln!("wrote {}", p.display());
+                    eprintln!("  \x1b[32m✓\x1b[0m wrote {}", p.display());
                 }
                 None => println!("{json}"),
             }
@@ -187,12 +249,14 @@ fn main() -> anyhow::Result<()> {
             format,
             store_dir,
         } => {
+            let total_start = Instant::now();
             let store_path = store_dir.unwrap_or_else(|| path.join(".grapha"));
-            let graph = run_pipeline(&path)?;
+            let graph = run_pipeline(&path, true)?;
 
             std::fs::create_dir_all(&store_path)
                 .with_context(|| format!("failed to create store dir {}", store_path.display()))?;
 
+            let t = Instant::now();
             let s: Box<dyn store::Store> = match format.as_str() {
                 "json" => Box::new(store::json::JsonStore::new(store_path.join("graph.json"))),
                 "sqlite" => Box::new(store::sqlite::SqliteStore::new(
@@ -200,26 +264,23 @@ fn main() -> anyhow::Result<()> {
                 )),
                 other => anyhow::bail!("unknown store format: {other}"),
             };
-
             s.save(&graph)?;
+            progress::done(&format!("saved to {} ({})", store_path.display(), format), t);
 
-            // Also build search index
+            let t = Instant::now();
             let search_index_path = store_path.join("search_index");
             search::build_index(&graph, &search_index_path)?;
+            progress::done("built search index", t);
 
-            eprintln!(
-                "indexed {} nodes, {} edges → {}",
+            progress::summary(&format!(
+                "\n  {} nodes, {} edges indexed in {:.1}s",
                 graph.nodes.len(),
                 graph.edges.len(),
-                store_path.display()
-            );
+                total_start.elapsed().as_secs_f64(),
+            ));
         }
         Commands::Context { symbol, path } => {
-            let db_path = path.join(".grapha/grapha.db");
-            let s = store::sqlite::SqliteStore::new(db_path);
-            let graph = s
-                .load()
-                .context("no index found — run `grapha index` first")?;
+            let graph = load_graph(&path)?;
             let result = query::context::query_context(&graph, &symbol)
                 .ok_or_else(|| anyhow::anyhow!("symbol not found: {symbol}"))?;
             println!("{}", serde_json::to_string_pretty(&result)?);
@@ -229,21 +290,13 @@ fn main() -> anyhow::Result<()> {
             depth,
             path,
         } => {
-            let db_path = path.join(".grapha/grapha.db");
-            let s = store::sqlite::SqliteStore::new(db_path);
-            let graph = s
-                .load()
-                .context("no index found — run `grapha index` first")?;
+            let graph = load_graph(&path)?;
             let result = query::impact::query_impact(&graph, &symbol, depth)
                 .ok_or_else(|| anyhow::anyhow!("symbol not found: {symbol}"))?;
             println!("{}", serde_json::to_string_pretty(&result)?);
         }
         Commands::Changes { scope, path } => {
-            let db_path = path.join(".grapha/grapha.db");
-            let s = store::sqlite::SqliteStore::new(db_path);
-            let graph = s
-                .load()
-                .context("no index found — run `grapha index` first")?;
+            let graph = load_graph(&path)?;
             let report = changes::detect_changes(&path, &graph, &scope)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
@@ -256,11 +309,8 @@ fn main() -> anyhow::Result<()> {
             let index = if search_index_path.exists() {
                 tantivy::Index::open_in_dir(&search_index_path)?
             } else {
-                let db_path = path.join(".grapha/grapha.db");
-                let s = store::sqlite::SqliteStore::new(db_path);
-                let graph = s
-                    .load()
-                    .context("no index found — run `grapha index` first")?;
+                let graph = load_graph(&path)?;
+                eprintln!("  building search index...");
                 search::build_index(&graph, &search_index_path)?
             };
             let results = search::search(&index, &q, limit)?;
