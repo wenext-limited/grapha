@@ -189,68 +189,88 @@ fn run_pipeline(path: &Path, verbose: bool) -> anyhow::Result<grapha_core::graph
         None
     };
 
-    let mut results = Vec::new();
-    let mut skipped = 0usize;
-    for file in &files {
-        let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("");
-        if !matches!(ext, "rs" | "swift") {
-            continue;
-        }
+    use rayon::prelude::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
-        let source =
-            std::fs::read(file).with_context(|| format!("failed to read {}", file.display()))?;
+    let skipped = AtomicUsize::new(0);
 
-        let relative = if path.is_dir() {
-            file.strip_prefix(path).unwrap_or(file)
-        } else {
-            file.file_name()
-                .map(|n| n.as_ref())
-                .unwrap_or(file.as_path())
-        };
-
-        let abs_file = std::fs::canonicalize(file).unwrap_or_else(|_| abs_root.join(relative));
-        let file_module = module_map.module_for_file(&abs_file).or_else(|| {
-            relative
-                .components()
-                .next()
-                .and_then(|c| c.as_os_str().to_str())
-                .map(|s| s.to_string())
-        });
-
-        // Use language-specific extraction: Swift uses waterfall (index-store → SwiftSyntax → tree-sitter)
-        let extraction_result = match ext {
-            "swift" => grapha_swift::extract_swift(&source, relative, None, Some(&abs_root)),
-            "rs" => {
-                let extractor = extract::rust::RustExtractor;
-                use grapha_core::LanguageExtractor;
-                extractor.extract(&source, relative)
+    let results: Vec<_> = files
+        .par_iter()
+        .filter_map(|file| {
+            let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("");
+            if !matches!(ext, "rs" | "swift") {
+                if let Some(ref pb) = pb {
+                    pb.inc(1);
+                }
+                return None;
             }
-            _ => continue,
-        };
 
-        match extraction_result {
-            Ok(result) => {
-                let stamped = stamp_module(result, &file_module);
-                results.push(stamped);
-            }
-            Err(e) => {
-                skipped += 1;
-                if verbose {
+            let source = match std::fs::read(file) {
+                Ok(s) => s,
+                Err(_) => {
+                    skipped.fetch_add(1, Ordering::Relaxed);
                     if let Some(ref pb) = pb {
-                        pb.suspend(|| {
-                            eprintln!("  \x1b[33m!\x1b[0m skipping {}: {e}", file.display())
-                        });
-                    } else {
-                        eprintln!("  \x1b[33m!\x1b[0m skipping {}: {e}", file.display());
+                        pb.inc(1);
                     }
+                    return None;
+                }
+            };
+
+            let relative = if path.is_dir() {
+                file.strip_prefix(path).unwrap_or(file)
+            } else {
+                file.file_name()
+                    .map(|n| n.as_ref())
+                    .unwrap_or(file.as_path())
+            };
+
+            let abs_file =
+                std::fs::canonicalize(file).unwrap_or_else(|_| abs_root.join(relative));
+            let file_module = module_map.module_for_file(&abs_file).or_else(|| {
+                relative
+                    .components()
+                    .next()
+                    .and_then(|c| c.as_os_str().to_str())
+                    .map(|s| s.to_string())
+            });
+
+            let extraction_result = match ext {
+                "swift" => {
+                    grapha_swift::extract_swift(&source, relative, None, Some(&abs_root))
+                }
+                "rs" => {
+                    let extractor = extract::rust::RustExtractor;
+                    use grapha_core::LanguageExtractor;
+                    extractor.extract(&source, relative)
+                }
+                _ => return None,
+            };
+
+            if let Some(ref pb) = pb {
+                pb.inc(1);
+            }
+
+            match extraction_result {
+                Ok(result) => Some(stamp_module(result, &file_module)),
+                Err(e) => {
+                    skipped.fetch_add(1, Ordering::Relaxed);
+                    if verbose {
+                        if let Some(ref pb) = pb {
+                            pb.suspend(|| {
+                                eprintln!(
+                                    "  \x1b[33m!\x1b[0m skipping {}: {e}",
+                                    file.display()
+                                )
+                            });
+                        }
+                    }
+                    None
                 }
             }
-        }
+        })
+        .collect();
 
-        if let Some(ref pb) = pb {
-            pb.inc(1);
-        }
-    }
+    let skipped = skipped.load(Ordering::Relaxed);
 
     if let Some(pb) = pb {
         pb.finish_and_clear();

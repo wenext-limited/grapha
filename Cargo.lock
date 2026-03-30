@@ -665,6 +665,7 @@ dependencies = [
  "ignore",
  "indicatif",
  "predicates",
+ "rayon",
  "regex",
  "rusqlite",
  "serde",
