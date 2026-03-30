@@ -2,7 +2,66 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crate::classify::{ClassifyContext, CompositeClassifier};
-use grapha_core::graph::{EdgeKind, Graph, NodeRole};
+use grapha_core::graph::{EdgeKind, FlowDirection, Graph, NodeRole, TerminalKind};
+
+/// Extract the module name from a Swift USR string.
+/// USR format: `s:<len><ModuleName><rest>` where len is the character count of the module name.
+fn module_from_usr(usr: &str) -> Option<&str> {
+    let rest = usr.strip_prefix("s:")?;
+    let len_end = rest.find(|c: char| !c.is_ascii_digit())?;
+    let len: usize = rest[..len_end].parse().ok()?;
+    let name_start = len_end;
+    if name_start + len <= rest.len() {
+        Some(&rest[name_start..name_start + len])
+    } else {
+        None
+    }
+}
+
+/// Classify a call edge target by its module (for USR-based index store data).
+fn classify_by_module(target_usr: &str) -> Option<(TerminalKind, FlowDirection, String)> {
+    let module = module_from_usr(target_usr)?;
+    match module {
+        // Network
+        "FrameNetwork" | "FrameNetworkCore" | "Moya" | "Alamofire" => {
+            let dir = if target_usr.contains("request") || target_usr.contains("fetch") || target_usr.contains("get") {
+                FlowDirection::ReadWrite
+            } else {
+                FlowDirection::ReadWrite
+            };
+            Some((TerminalKind::Network, dir, "request".to_string()))
+        }
+        // Persistence — database
+        "FrameStorage" | "FrameStorageCore" | "FrameStorageDatabase" | "GRDB" | "CoreData" | "RealmSwift" => {
+            Some((TerminalKind::Persistence, FlowDirection::ReadWrite, "db".to_string()))
+        }
+        // Persistence — file/download
+        "FrameDownload" | "Tiercel" => {
+            Some((TerminalKind::Persistence, FlowDirection::Write, "download".to_string()))
+        }
+        // Cache / resources
+        "FrameResources" | "AppResource" | "Kingfisher" | "SDWebImageSwiftUI" | "FrameImage" => {
+            Some((TerminalKind::Cache, FlowDirection::Read, "resource".to_string()))
+        }
+        // Events / WebSocket
+        "FrameWebView" | "WEKit" => {
+            Some((TerminalKind::Event, FlowDirection::ReadWrite, "webview".to_string()))
+        }
+        // Statistics / analytics
+        "FrameStat" => {
+            Some((TerminalKind::Event, FlowDirection::Write, "stat".to_string()))
+        }
+        // Media
+        "FrameMedia" | "FrameMediaShared" => {
+            Some((TerminalKind::Cache, FlowDirection::ReadWrite, "media".to_string()))
+        }
+        // Router
+        "FrameRouter" => {
+            Some((TerminalKind::Event, FlowDirection::Write, "navigate".to_string()))
+        }
+        _ => None,
+    }
+}
 
 pub fn classify_graph(graph: &Graph, classifier: &CompositeClassifier) -> Graph {
     let node_file_map: HashMap<&str, &PathBuf> = graph
@@ -11,6 +70,8 @@ pub fn classify_graph(graph: &Graph, classifier: &CompositeClassifier) -> Graph 
         .map(|n| (n.id.as_str(), &n.file))
         .collect();
 
+    let node_ids: std::collections::HashSet<&str> =
+        graph.nodes.iter().map(|n| n.id.as_str()).collect();
     let mut terminal_nodes: HashMap<String, grapha_core::graph::TerminalKind> = HashMap::new();
 
     let new_edges: Vec<_> = graph
@@ -35,16 +96,27 @@ pub fn classify_graph(graph: &Graph, classifier: &CompositeClassifier) -> Graph 
                 arguments: vec![],
             };
 
-            match classifier.classify(target_name, &context) {
-                Some(classification) => {
-                    terminal_nodes.insert(edge.target.clone(), classification.terminal_kind);
-
-                    let mut new_edge = edge.clone();
-                    new_edge.direction = Some(classification.direction);
-                    new_edge.operation = Some(classification.operation);
-                    new_edge
+            // Try string-based classifier first, then USR module-based fallback
+            if let Some(classification) = classifier.classify(target_name, &context) {
+                terminal_nodes.insert(edge.target.clone(), classification.terminal_kind);
+                let mut new_edge = edge.clone();
+                new_edge.direction = Some(classification.direction);
+                new_edge.operation = Some(classification.operation);
+                new_edge
+            } else if let Some((kind, direction, operation)) = classify_by_module(&edge.target) {
+                // For external framework calls, mark the SOURCE (local function) as terminal
+                // since the target is an external symbol not in our graph
+                if !node_ids.contains(edge.target.as_str()) {
+                    terminal_nodes.entry(edge.source.clone()).or_insert(kind);
+                } else {
+                    terminal_nodes.insert(edge.target.clone(), kind);
                 }
-                None => edge.clone(),
+                let mut new_edge = edge.clone();
+                new_edge.direction = Some(direction);
+                new_edge.operation = Some(operation);
+                new_edge
+            } else {
+                edge.clone()
             }
         })
         .collect();
