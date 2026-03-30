@@ -17,22 +17,21 @@ struct NameEntry {
 /// the symbol name (last `::` segment) against all known nodes.
 ///
 /// Resolution priority:
-/// 1. Same-module candidate (confidence 0.9x)
-/// 2. Imported-module candidate (confidence 0.8x)
-/// 3. Single unambiguous candidate in a different module (confidence 0.7x)
-/// 4. Multiple ambiguous candidates — drop edge (too unreliable)
+/// 1. Same-module, unique candidate (confidence 0.9x)
+/// 2. Same-module, narrowed by access-chain hint (confidence 0.85x)
+/// 3. Imported-module, unique candidate (confidence 0.8x)
+/// 4. Single unambiguous candidate in a different module with import (confidence 0.7x)
+/// 5. Multiple same-module candidates — keep all (confidence 0.4x)
+/// 6. No viable candidates — drop edge
 pub fn merge(results: Vec<ExtractionResult>) -> Graph {
     let mut graph = Graph::new();
 
     // Build file → set of imported module names from import statements.
-    // Swift `import Foo` means the file can reference symbols from module "Foo".
     let mut file_imports: HashMap<String, HashSet<String>> = HashMap::new();
     for r in &results {
         for import in &r.imports {
-            // The import source file is the first node's file (all nodes in a result share the same file)
             if let Some(first_node) = r.nodes.first() {
                 let file_key = first_node.file.to_string_lossy().to_string();
-                // import path is like "import Foundation" — the module name is the path itself
                 let module_name = import
                     .path
                     .strip_prefix("import ")
@@ -76,61 +75,76 @@ pub fn merge(results: Vec<ExtractionResult>) -> Graph {
         })
         .collect();
 
-    for r in results {
-        for mut edge in r.edges {
-            if node_ids.contains(edge.target.as_str()) || edge.kind == EdgeKind::Uses {
-                graph.edges.push(edge);
-            } else {
-                // Try cross-file resolution by symbol name
-                let target_name = edge.target.rsplit("::").next().unwrap_or(&edge.target);
-                if let Some(candidates) = name_to_entries.get(target_name) {
-                    if candidates.is_empty() {
-                        continue;
-                    }
+    // Build child_id → parent type names from Contains edges for hint-based disambiguation.
+    let id_to_name: HashMap<&str, &str> =
+        graph.nodes.iter().map(|n| (n.id.as_str(), n.name.as_str())).collect();
+    let mut child_to_parent_names: HashMap<String, Vec<String>> = HashMap::new();
+    for r in &results {
+        for edge in &r.edges {
+            if edge.kind == EdgeKind::Contains
+                && let Some(parent_name) = id_to_name.get(edge.source.as_str()) {
+                    child_to_parent_names
+                        .entry(edge.target.clone())
+                        .or_default()
+                        .push(parent_name.to_string());
+                }
+        }
+    }
 
-                    let (source_module, source_file) = id_to_info
-                        .get(edge.source.as_str())
-                        .copied()
-                        .unwrap_or((None, ""));
-                    let source_imports = file_imports.get(source_file);
+    // Collect all edges to process (need to borrow results for child_to_parent_names above)
+    let all_edges: Vec<_> = results.into_iter().flat_map(|r| r.edges).collect();
 
-                    if candidates.len() == 1 {
-                        let candidate = &candidates[0];
-                        let same_module =
-                            modules_match(source_module, candidate.module.as_deref());
-                        if same_module {
-                            edge.target = candidate.id.clone();
-                            edge.confidence *= 0.9;
-                            graph.edges.push(edge);
-                        } else {
-                            // Cross-module single candidate: only keep if the
-                            // source file imports the candidate's module
-                            let imported = source_imports
-                                .and_then(|imports| {
-                                    candidate.module.as_deref().map(|m| imports.contains(m))
-                                })
-                                .unwrap_or(false);
-                            if imported {
-                                edge.target = candidate.id.clone();
-                                edge.confidence *= 0.7;
-                                graph.edges.push(edge);
-                            }
-                            // else: cross-module without import → drop
-                        }
+    for mut edge in all_edges {
+        if node_ids.contains(edge.target.as_str()) || edge.kind == EdgeKind::Uses {
+            graph.edges.push(edge);
+        } else {
+            let target_name = edge.target.rsplit("::").next().unwrap_or(&edge.target);
+            if let Some(candidates) = name_to_entries.get(target_name) {
+                if candidates.is_empty() {
+                    continue;
+                }
+
+                let (source_module, source_file) = id_to_info
+                    .get(edge.source.as_str())
+                    .copied()
+                    .unwrap_or((None, ""));
+                let source_imports = file_imports.get(source_file);
+                let prefix_hint = edge.operation.as_deref();
+
+                if candidates.len() == 1 {
+                    let candidate = &candidates[0];
+                    let same_module =
+                        modules_match(source_module, candidate.module.as_deref());
+                    if same_module {
+                        edge.target = candidate.id.clone();
+                        edge.confidence *= 0.9;
+                        graph.edges.push(edge);
                     } else {
-                        // Multiple candidates — use priority: same-module > imported > drop
-                        let resolved = resolve_candidate(
-                            candidates,
-                            source_module,
-                            source_imports,
-                        );
-
-                        if let Some((candidate_id, factor)) = resolved {
-                            edge.target = candidate_id;
-                            edge.confidence *= factor;
+                        let imported = source_imports
+                            .and_then(|imports| {
+                                candidate.module.as_deref().map(|m| imports.contains(m))
+                            })
+                            .unwrap_or(false);
+                        if imported {
+                            edge.target = candidate.id.clone();
+                            edge.confidence *= 0.7;
                             graph.edges.push(edge);
                         }
-                        // else: ambiguous, drop edge
+                    }
+                } else {
+                    let resolved = resolve_candidates(
+                        candidates,
+                        source_module,
+                        source_imports,
+                        prefix_hint,
+                        &child_to_parent_names,
+                    );
+
+                    for (candidate_id, factor) in resolved {
+                        let mut resolved_edge = edge.clone();
+                        resolved_edge.target = candidate_id;
+                        resolved_edge.confidence *= factor;
+                        graph.edges.push(resolved_edge);
                     }
                 }
             }
@@ -140,20 +154,49 @@ pub fn merge(results: Vec<ExtractionResult>) -> Graph {
     graph
 }
 
-/// Pick the best candidate from multiple matches.
-/// Returns (candidate_id, confidence_factor) or None if too ambiguous.
-fn resolve_candidate(
+/// Pick the best candidate(s) from multiple matches.
+/// Returns a vec of (candidate_id, confidence_factor).
+fn resolve_candidates(
     candidates: &[NameEntry],
     source_module: Option<&str>,
     source_imports: Option<&HashSet<String>>,
-) -> Option<(String, f64)> {
+    prefix_hint: Option<&str>,
+    child_to_parent_names: &HashMap<String, Vec<String>>,
+) -> Vec<(String, f64)> {
     // 1. Same-module candidates
     let same_module: Vec<&NameEntry> = candidates
         .iter()
         .filter(|c| modules_match(source_module, c.module.as_deref()))
         .collect();
     if same_module.len() == 1 {
-        return Some((same_module[0].id.clone(), 0.9));
+        return vec![(same_module[0].id.clone(), 0.9)];
+    }
+
+    // 1b. Multiple same-module — try prefix hint disambiguation
+    if same_module.len() > 1 {
+        if let Some(hint) = prefix_hint {
+            // Last segment of the prefix is the receiver name (e.g., "gift" from "AppContext.gift")
+            let hint_name = hint.rsplit('.').next().unwrap_or(hint).to_lowercase();
+            let narrowed: Vec<&&NameEntry> = same_module
+                .iter()
+                .filter(|c| {
+                    child_to_parent_names
+                        .get(&c.id)
+                        .is_some_and(|parents| {
+                            parents.iter().any(|p| p.to_lowercase().contains(&hint_name))
+                        })
+                })
+                .collect();
+            if narrowed.len() == 1 {
+                return vec![(narrowed[0].id.clone(), 0.85)];
+            }
+        }
+
+        // Fallback: keep all same-module candidates with low confidence
+        return same_module
+            .iter()
+            .map(|c| (c.id.clone(), 0.4))
+            .collect();
     }
 
     // 2. Imported-module candidates
@@ -167,12 +210,18 @@ fn resolve_candidate(
             })
             .collect();
         if imported.len() == 1 {
-            return Some((imported[0].id.clone(), 0.8));
+            return vec![(imported[0].id.clone(), 0.8)];
+        }
+        if imported.len() > 1 {
+            return imported
+                .iter()
+                .map(|c| (c.id.clone(), 0.3))
+                .collect();
         }
     }
 
-    // 3. Too ambiguous — drop
-    None
+    // 3. No viable candidates — drop
+    Vec::new()
 }
 
 /// Check if two modules match. Two `None` modules are considered matching

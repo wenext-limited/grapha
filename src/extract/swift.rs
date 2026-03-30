@@ -985,6 +985,24 @@ fn extract_inheritance_edges(
     }
 }
 
+/// Extract the prefix of a navigation expression chain.
+/// For `AppContext.gift.activityGiftConfigs`, returns `Some("AppContext.gift")`.
+/// For `foo.bar`, returns `Some("foo")`.
+fn extract_nav_prefix(node: tree_sitter::Node, source: &[u8]) -> Option<String> {
+    let mut cursor = node.walk();
+    // The first named child that isn't a navigation_suffix is the prefix expression
+    let first_child = node
+        .named_children(&mut cursor)
+        .find(|c| c.kind() != "navigation_suffix")?;
+    let text = first_child.utf8_text(source).ok()?;
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
 /// Recursively scan for `call_expression` and `navigation_expression` nodes,
 /// emitting Calls edges for function calls and TypeRef edges for property accesses.
 fn extract_calls(
@@ -1026,25 +1044,26 @@ fn extract_calls(
             .named_children(&mut cursor)
             .filter(|c| c.kind() == "navigation_suffix")
             .last()
-        {
-            if let Some(name_node) = suffix.named_child(0)
+            && let Some(name_node) = suffix.named_child(0)
                 && let Ok(prop_name) = name_node.utf8_text(source)
                 && !prop_name.is_empty()
             {
                 let target_id = make_id(file, module_path, prop_name);
                 let condition = find_enclosing_swift_condition(node, source);
+                // Extract the prefix chain (e.g., "AppContext.gift" from "AppContext.gift.activityGiftConfigs")
+                // to help the merge step disambiguate among multiple candidates.
+                let prefix = extract_nav_prefix(node, source);
                 result.edges.push(Edge {
                     source: caller_id.to_string(),
                     target: target_id,
                     kind: EdgeKind::Calls,
                     confidence: 0.6,
                     direction: None,
-                    operation: None,
+                    operation: prefix,
                     condition,
                     async_boundary: None,
                 });
             }
-        }
     }
 
     // Recurse into all children
