@@ -10,14 +10,6 @@ use super::{ExtractionResult, LanguageExtractor};
 pub struct RustExtractor;
 
 impl LanguageExtractor for RustExtractor {
-    fn language(&self) -> &str {
-        "rust"
-    }
-
-    fn file_extensions(&self) -> &[&str] {
-        &["rs"]
-    }
-
     fn extract(&self, source: &[u8], file_path: &Path) -> anyhow::Result<ExtractionResult> {
         let mut parser = Parser::new();
         parser.set_language(&tree_sitter_rust::LANGUAGE.into())?;

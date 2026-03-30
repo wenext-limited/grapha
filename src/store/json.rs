@@ -30,9 +30,6 @@ impl Store for JsonStore {
         Ok(graph)
     }
 
-    fn exists(&self) -> bool {
-        self.path.exists()
-    }
 }
 
 #[cfg(test)]
@@ -47,7 +44,7 @@ mod tests {
 
         let graph = Graph::new();
         store.save(&graph).unwrap();
-        assert!(store.exists());
+        assert!(store.path.exists());
 
         let loaded = store.load().unwrap();
         assert_eq!(loaded.version, graph.version);

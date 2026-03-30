@@ -7,6 +7,4 @@ use crate::graph::Graph;
 pub trait Store {
     fn save(&self, graph: &Graph) -> anyhow::Result<()>;
     fn load(&self) -> anyhow::Result<Graph>;
-    #[allow(dead_code)]
-    fn exists(&self) -> bool;
 }

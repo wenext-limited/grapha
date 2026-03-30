@@ -10,14 +10,6 @@ use super::{ExtractionResult, LanguageExtractor};
 pub struct SwiftExtractor;
 
 impl LanguageExtractor for SwiftExtractor {
-    fn language(&self) -> &str {
-        "swift"
-    }
-
-    fn file_extensions(&self) -> &[&str] {
-        &["swift"]
-    }
-
     fn extract(&self, source: &[u8], file_path: &Path) -> anyhow::Result<ExtractionResult> {
         let mut parser = Parser::new();
         parser.set_language(&tree_sitter_swift::LANGUAGE.into())?;

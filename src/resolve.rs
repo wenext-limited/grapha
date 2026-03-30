@@ -1,5 +1,3 @@
-pub mod rust;
-
 use serde::{Deserialize, Serialize};
 
 /// A structured import declaration extracted from source code.
