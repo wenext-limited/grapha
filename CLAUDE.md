@@ -4,14 +4,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Grapha is a lightweight structural abstraction layer that transforms complex source code into a normalized, graph-based representation optimized for LLM consumption. It uses fast syntax parsing (via tree-sitter) to extract symbols, relationships, and call patterns, then compresses them into a navigable node graph. This enables agents to efficiently locate, traverse, and reason about code at scale with minimal context.
+Grapha is a lightweight code intelligence CLI that transforms source code into a normalized, graph-based representation optimized for LLM consumption. It uses fast syntax parsing (via tree-sitter) to extract symbols, relationships, and call patterns, compresses them into a navigable node graph, and provides persistence, search, and impact analysis for agent-driven workflows.
 
 ## Build & Development Commands
 
 ```bash
 cargo build                    # Build the project
-cargo run -- <args>            # Run the CLI
-cargo test                     # Run all tests
+cargo run -- <subcommand>      # Run the CLI (analyze, index, context, impact, search, changes)
+cargo test                     # Run all tests (79 tests)
 cargo test <test_name>         # Run a single test
 cargo test --lib               # Run unit tests only
 cargo test --test <name>       # Run a specific integration test
@@ -22,24 +22,56 @@ cargo fmt -- --check           # Check formatting without modifying
 
 ## Architecture
 
-- **Language**: Rust, CLI-first (using `clap` for argument parsing)
-- **Parsing**: tree-sitter grammars for language-specific syntax parsing (starting with Swift via `tree-sitter-swift`)
-- **Design principle**: Structural/syntactic analysis only — no compiler-level semantic validation. Full semantic checks are deferred to downstream tooling when necessary.
+- **Language**: Rust, CLI-first (using `clap` with subcommands)
+- **Parsing**: tree-sitter grammars for Rust (`tree-sitter-rust`) and Swift (`tree-sitter-swift`)
+- **Persistence**: SQLite via `rusqlite` (production), JSON (debug)
+- **Search**: BM25 full-text search via `tantivy`
+- **Change detection**: Git diff via `git2`
+- **Design principle**: Structural/syntactic analysis only — no compiler-level semantic validation
 
 ### Core Pipeline
 
 1. **Parse** — tree-sitter parses source files into concrete syntax trees
 2. **Extract** — walk CSTs to identify symbols (functions, types, protocols, properties) and relationships (calls, conformances, imports, inheritance)
-3. **Normalize** — transform extracted data into a unified node graph representation independent of source language
-4. **Compress** — minimize graph for LLM consumption while preserving navigability
-5. **Output** — serialize the graph (JSON or other formats) for agent consumption
+3. **Merge** — combine per-file results into a single graph with cross-file edge resolution (name-based, with confidence scoring)
+4. **Compress** — prune inferrable edges and group by file for LLM consumption (`--compact`)
+5. **Persist** — store to SQLite or JSON via the `Store` trait
+6. **Query** — context (360° symbol view), impact (BFS blast radius), search (BM25)
+
+### CLI Subcommands
+
+```
+grapha analyze <path> [--output FILE] [--filter KINDS] [--compact]
+grapha index <path> [--format sqlite|json] [--store-dir DIR]
+grapha context <symbol> [-p PATH]
+grapha impact <symbol> [--depth N] [-p PATH]
+grapha search <query> [--limit N] [-p PATH]
+grapha changes [SCOPE] [-p PATH]
+```
 
 ### Module Style
 
 Use `foo.rs` + `foo/` directory pattern (not `foo/mod.rs`).
 
+### Key Modules
+
+| Module | Purpose |
+|--------|---------|
+| `extract/rust.rs` | Rust tree-sitter extraction |
+| `extract/swift.rs` | Swift tree-sitter extraction |
+| `merge.rs` | Merge per-file results, cross-file edge resolution |
+| `compress/prune.rs` | Drop inferrable edges and noise |
+| `compress/group.rs` | Semantic file→type→members grouping |
+| `store/sqlite.rs` | SQLite persistence backend |
+| `store/json.rs` | JSON persistence backend |
+| `query/context.rs` | 360° symbol context (callers, callees, impls) |
+| `query/impact.rs` | BFS blast radius analysis |
+| `search.rs` | BM25 full-text search via tantivy |
+| `changes.rs` | Git diff → affected symbols → impact |
+
 ### Key Design Decisions
 
 - Tree-sitter over full compiler frontends: prioritizes speed and language coverage over semantic correctness
-- Graph nodes represent symbols; edges represent relationships (calls, inherits, conforms, imports)
-- The graph is designed to be traversed by LLM agents — optimize for minimal tokens, not human readability
+- Graph nodes represent symbols; edges represent relationships with confidence scores (0.0–1.0)
+- Cross-file resolution is name-based: unambiguous matches get 0.9x confidence, ambiguous get 0.5x
+- The `--compact` output groups by file and inlines relationships for token-efficient LLM traversal
