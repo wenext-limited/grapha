@@ -347,7 +347,7 @@ fn extract_property_as_entry_point(
     emit_contains_edge(parent_id, &id, result);
 
     result.nodes.push(Node {
-        id,
+        id: id.clone(),
         kind: NodeKind::Property,
         name,
         file: file.into(),
@@ -359,6 +359,14 @@ fn extract_property_as_entry_point(
         doc_comment: None,
         module: None,
     });
+
+    // Scan property body for calls (same as extract_property)
+    extract_calls(node, source, file, module_path, &id, result);
+    // Always run regex fallback to catch calls inside closures/ViewBuilder
+    // bodies that tree-sitter doesn't parse as call_expression nodes.
+    if let Ok(text) = node.utf8_text(source) {
+        extract_calls_from_text(text, file, module_path, &id, result);
+    }
 }
 
 /// Extract a function with an optional entry point hint from parent (Observable).
@@ -697,7 +705,7 @@ fn extract_property(
     emit_contains_edge(parent_id, &id, result);
 
     result.nodes.push(Node {
-        id,
+        id: id.clone(),
         kind: NodeKind::Property,
         name,
         file: file.into(),
@@ -709,6 +717,83 @@ fn extract_property(
         doc_comment: None,
         module: None,
     });
+
+    // Scan property body for calls via tree-sitter AST
+    extract_calls(node, source, file, module_path, &id, result);
+
+    // Fallback: if no calls edges were found via AST, scan the property's source
+    // text for function call patterns using regex. This handles cases where
+    // tree-sitter-swift doesn't produce call_expression nodes (e.g., SwiftUI
+    // View body with result builders).
+    let calls_before = result.edges.iter().filter(|e| e.source == id && e.kind == EdgeKind::Calls).count();
+    if calls_before == 0
+        && let Ok(text) = node.utf8_text(source) {
+            extract_calls_from_text(text, file, module_path, &id, result);
+        }
+}
+
+/// Extract function calls from raw source text using regex.
+/// Fallback for when tree-sitter doesn't produce call_expression nodes
+/// (e.g., SwiftUI View body with result builders).
+fn extract_calls_from_text(
+    text: &str,
+    file: &str,
+    module_path: &[String],
+    caller_id: &str,
+    result: &mut ExtractionResult,
+) {
+    // Match patterns like: identifier( or .identifier(
+    // But skip common keywords and type annotations
+    let call_re = regex::Regex::new(r"(?:^|[.\s({,])([a-z][a-zA-Z0-9]*)\s*\(").unwrap();
+    let skip_names: std::collections::HashSet<&str> = [
+        "if", "for", "while", "switch", "guard", "return", "let", "var", "case",
+        "some", "in", "as", "is", "try", "await", "throw", "catch", "where",
+    ].into_iter().collect();
+
+    let mut seen = std::collections::HashSet::new();
+    for cap in call_re.captures_iter(text) {
+        let fn_name = cap.get(1).unwrap().as_str();
+        if skip_names.contains(fn_name) || !seen.insert(fn_name.to_string()) {
+            continue;
+        }
+        let target_id = make_id(file, module_path, fn_name);
+        result.edges.push(Edge {
+            source: caller_id.to_string(),
+            target: target_id,
+            kind: EdgeKind::Calls,
+            confidence: 0.5, // lower confidence for regex-based extraction
+            direction: None,
+            operation: None,
+            condition: None,
+            async_boundary: None,
+        });
+    }
+
+    // Also match property access chains like AppContext.gift.activityGiftConfigs
+    let nav_re = regex::Regex::new(r"[A-Za-z][a-zA-Z0-9]*(?:\.[a-zA-Z][a-zA-Z0-9]*)+").unwrap();
+    for mat in nav_re.find_iter(text) {
+        let chain = mat.as_str();
+        let parts: Vec<&str> = chain.split('.').collect();
+        if parts.len() >= 2 {
+            let last = *parts.last().unwrap();
+            if skip_names.contains(last) || seen.contains(last) {
+                continue;
+            }
+            seen.insert(last.to_string());
+            let prefix = parts[..parts.len() - 1].join(".");
+            let target_id = make_id(file, module_path, last);
+            result.edges.push(Edge {
+                source: caller_id.to_string(),
+                target: target_id,
+                kind: EdgeKind::Calls,
+                confidence: 0.5,
+                direction: None,
+                operation: Some(prefix),
+                condition: None,
+                async_boundary: None,
+            });
+        }
+    }
 }
 
 /// Find the name from a `pattern > simple_identifier` child.
@@ -1068,7 +1153,10 @@ fn extract_calls(
 
     // Recurse into all children
     let mut cursor = node.walk();
-    for child in node.named_children(&mut cursor) {
+    for child in node.children(&mut cursor) {
+        if child.kind() == "ERROR" {
+            eprintln!("DEBUG ERROR node at line {} text={:?}", child.start_position().row, child.utf8_text(source).unwrap_or("").chars().take(80).collect::<String>());
+        }
         extract_calls(child, source, file, module_path, caller_id, result);
     }
 }
