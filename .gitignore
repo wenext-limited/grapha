@@ -7,6 +7,5 @@ nodus.lock
 target
 
 
-# Added by cargo
-
-/target
+.qlipoth
+qlipoth.toml
