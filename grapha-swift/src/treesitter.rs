@@ -1402,9 +1402,135 @@ fn is_builtin_swiftui_view(name: &str) -> bool {
     )
 }
 
-fn swiftui_view_name(node: tree_sitter::Node, source: &[u8]) -> Option<String> {
-    let name = simple_identifier_text(node, source)?;
-    uppercase_identifier(&name).then_some(name)
+fn navigation_base_and_member_name<'a>(
+    node: tree_sitter::Node<'a>,
+    source: &[u8],
+) -> Option<(tree_sitter::Node<'a>, String)> {
+    if node.kind() != "navigation_expression" {
+        return None;
+    }
+
+    let mut cursor = node.walk();
+    let mut base = None;
+    let mut member_name = None;
+    for child in node.named_children(&mut cursor) {
+        match child.kind() {
+            "navigation_suffix" => {
+                if let Some(name_node) = child.named_child(0)
+                    && let Ok(name) = name_node.utf8_text(source)
+                    && !name.is_empty()
+                {
+                    member_name = Some(name.to_string());
+                }
+            }
+            _ if base.is_none() => {
+                base = Some(child);
+            }
+            _ => {}
+        }
+    }
+
+    Some((base?, member_name?))
+}
+
+fn swiftui_call_name(node: tree_sitter::Node, source: &[u8]) -> Option<String> {
+    let mut cursor = node.walk();
+    let callee = node.named_children(&mut cursor).next()?;
+    match callee.kind() {
+        "simple_identifier" => callee.utf8_text(source).ok().map(ToString::to_string),
+        "navigation_expression" => {
+            navigation_base_and_member_name(callee, source).map(|(_, member_name)| member_name)
+        }
+        _ => None,
+    }
+}
+
+fn swiftui_modifier_receiver_and_name<'a>(
+    node: tree_sitter::Node<'a>,
+    source: &[u8],
+) -> Option<(tree_sitter::Node<'a>, String)> {
+    let mut cursor = node.walk();
+    let callee = node.named_children(&mut cursor).next()?;
+    let (receiver, member_name) = navigation_base_and_member_name(callee, source)?;
+    if uppercase_identifier(&member_name) {
+        None
+    } else {
+        Some((receiver, member_name))
+    }
+}
+
+fn is_view_builder_modifier(name: &str) -> bool {
+    matches!(
+        name,
+        "background"
+            | "contextMenu"
+            | "footer"
+            | "header"
+            | "mask"
+            | "overlay"
+            | "safeAreaInset"
+            | "toolbar"
+    )
+}
+
+fn view_reference_name(node: tree_sitter::Node, source: &[u8]) -> Option<String> {
+    let parent_kind = node.parent().map(|parent| parent.kind())?;
+    if !matches!(
+        parent_kind,
+        "statements" | "computed_property" | "lambda_literal"
+    ) {
+        return None;
+    }
+
+    match node.kind() {
+        "simple_identifier" => node
+            .utf8_text(source)
+            .ok()
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map(ToString::to_string),
+        "navigation_expression" => {
+            navigation_base_and_member_name(node, source).map(|(_, member_name)| member_name)
+        }
+        _ => None,
+    }
+}
+
+fn emit_swiftui_view_reference(
+    node: tree_sitter::Node,
+    source: &[u8],
+    file: &str,
+    module_path: &[String],
+    owner_id: &str,
+    parent_id: &str,
+    result: &mut ExtractionResult,
+) -> Option<String> {
+    let name = view_reference_name(node, source)?;
+    let view_id = emit_swiftui_node(
+        result,
+        owner_id,
+        parent_id,
+        &name,
+        NodeKind::View,
+        file,
+        node,
+    );
+    if !is_builtin_swiftui_view(&name) {
+        emit_unique_edge(
+            result,
+            Edge {
+                source: view_id.clone(),
+                target: make_id(file, module_path, &name),
+                kind: EdgeKind::TypeRef,
+                confidence: 0.85,
+                direction: None,
+                operation: None,
+                condition: None,
+                async_boundary: None,
+            },
+        );
+    }
+    Some(view_id)
 }
 
 fn call_suffix_lambda_children(node: tree_sitter::Node) -> Vec<tree_sitter::Node> {
@@ -1431,10 +1557,11 @@ fn recurse_swiftui_named_children(
     owner_id: &str,
     parent_id: &str,
     result: &mut ExtractionResult,
-) {
+) -> Vec<String> {
+    let mut anchors = Vec::new();
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
-        extract_swiftui_structure(
+        anchors.extend(extract_swiftui_structure(
             child,
             source,
             file,
@@ -1442,8 +1569,9 @@ fn recurse_swiftui_named_children(
             owner_id,
             parent_id,
             result,
-        );
+        ));
     }
+    anchors
 }
 
 fn extract_swiftui_if_structure(
@@ -1454,7 +1582,7 @@ fn extract_swiftui_if_structure(
     owner_id: &str,
     parent_id: &str,
     result: &mut ExtractionResult,
-) {
+) -> Vec<String> {
     let condition = node
         .child_by_field_name("condition")
         .and_then(|condition| condition.utf8_text(source).ok())
@@ -1469,6 +1597,7 @@ fn extract_swiftui_if_structure(
         }
     }
 
+    let mut branch_ids = Vec::new();
     if let Some(then_child) = named_children.first().copied() {
         let branch_id = emit_swiftui_node(
             result,
@@ -1479,7 +1608,8 @@ fn extract_swiftui_if_structure(
             file,
             then_child,
         );
-        extract_swiftui_structure(
+        branch_ids.push(branch_id.clone());
+        let _ = extract_swiftui_structure(
             then_child,
             source,
             file,
@@ -1500,7 +1630,8 @@ fn extract_swiftui_if_structure(
             file,
             else_child,
         );
-        extract_swiftui_structure(
+        branch_ids.push(branch_id.clone());
+        let _ = extract_swiftui_structure(
             else_child,
             source,
             file,
@@ -1510,6 +1641,8 @@ fn extract_swiftui_if_structure(
             result,
         );
     }
+
+    branch_ids
 }
 
 fn switch_entry_label(node: tree_sitter::Node, source: &[u8]) -> String {
@@ -1536,7 +1669,7 @@ fn extract_swiftui_switch_structure(
     owner_id: &str,
     parent_id: &str,
     result: &mut ExtractionResult,
-) {
+) -> Vec<String> {
     let label = node
         .child_by_field_name("expr")
         .and_then(|expr| expr.utf8_text(source).ok())
@@ -1569,7 +1702,7 @@ fn extract_swiftui_switch_structure(
         let mut case_cursor = child.walk();
         for case_child in child.named_children(&mut case_cursor) {
             if case_child.kind() == "statements" {
-                extract_swiftui_structure(
+                let _ = extract_swiftui_structure(
                     case_child,
                     source,
                     file,
@@ -1581,6 +1714,8 @@ fn extract_swiftui_switch_structure(
             }
         }
     }
+
+    vec![switch_id]
 }
 
 fn extract_swiftui_structure(
@@ -1591,21 +1726,21 @@ fn extract_swiftui_structure(
     owner_id: &str,
     parent_id: &str,
     result: &mut ExtractionResult,
-) {
+) -> Vec<String> {
     match node.kind() {
-        "statements" | "lambda_literal" | "computed_property" => {
-            recurse_swiftui_named_children(
-                node,
-                source,
-                file,
-                module_path,
-                owner_id,
-                parent_id,
-                result,
-            );
-        }
+        "statements" | "lambda_literal" | "computed_property" => recurse_swiftui_named_children(
+            node,
+            source,
+            file,
+            module_path,
+            owner_id,
+            parent_id,
+            result,
+        ),
         "call_expression" => {
-            if let Some(name) = swiftui_view_name(node, source) {
+            if let Some(name) = swiftui_call_name(node, source)
+                && uppercase_identifier(&name)
+            {
                 let view_id = emit_swiftui_node(
                     result,
                     owner_id,
@@ -1631,7 +1766,7 @@ fn extract_swiftui_structure(
                     );
                 }
                 for lambda in call_suffix_lambda_children(node) {
-                    extract_swiftui_structure(
+                    let _ = extract_swiftui_structure(
                         lambda,
                         source,
                         file,
@@ -1641,6 +1776,40 @@ fn extract_swiftui_structure(
                         result,
                     );
                 }
+                vec![view_id]
+            } else if let Some((receiver, modifier_name)) =
+                swiftui_modifier_receiver_and_name(node, source)
+            {
+                let anchors = extract_swiftui_structure(
+                    receiver,
+                    source,
+                    file,
+                    module_path,
+                    owner_id,
+                    parent_id,
+                    result,
+                );
+                if is_view_builder_modifier(&modifier_name) {
+                    let modifier_parents: Vec<String> = if anchors.is_empty() {
+                        vec![parent_id.to_string()]
+                    } else {
+                        anchors.clone()
+                    };
+                    for lambda in call_suffix_lambda_children(node) {
+                        for anchor in &modifier_parents {
+                            let _ = extract_swiftui_structure(
+                                lambda,
+                                source,
+                                file,
+                                module_path,
+                                owner_id,
+                                anchor,
+                                result,
+                            );
+                        }
+                    }
+                }
+                anchors
             } else {
                 recurse_swiftui_named_children(
                     node,
@@ -1650,42 +1819,47 @@ fn extract_swiftui_structure(
                     owner_id,
                     parent_id,
                     result,
-                );
+                )
             }
         }
-        "if_statement" => {
-            extract_swiftui_if_structure(
-                node,
-                source,
-                file,
-                module_path,
-                owner_id,
-                parent_id,
-                result,
-            );
-        }
-        "switch_statement" => {
-            extract_swiftui_switch_structure(
-                node,
-                source,
-                file,
-                module_path,
-                owner_id,
-                parent_id,
-                result,
-            );
-        }
-        _ => {
-            recurse_swiftui_named_children(
-                node,
-                source,
-                file,
-                module_path,
-                owner_id,
-                parent_id,
-                result,
-            );
-        }
+        "if_statement" => extract_swiftui_if_structure(
+            node,
+            source,
+            file,
+            module_path,
+            owner_id,
+            parent_id,
+            result,
+        ),
+        "switch_statement" => extract_swiftui_switch_structure(
+            node,
+            source,
+            file,
+            module_path,
+            owner_id,
+            parent_id,
+            result,
+        ),
+        "simple_identifier" | "navigation_expression" => emit_swiftui_view_reference(
+            node,
+            source,
+            file,
+            module_path,
+            owner_id,
+            parent_id,
+            result,
+        )
+        .into_iter()
+        .collect(),
+        _ => recurse_swiftui_named_children(
+            node,
+            source,
+            file,
+            module_path,
+            owner_id,
+            parent_id,
+            result,
+        ),
     }
 }
 
@@ -1700,7 +1874,15 @@ fn extract_swiftui_body_structure(
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
         if child.kind() == "computed_property" {
-            extract_swiftui_structure(child, source, file, module_path, body_id, body_id, result);
+            let _ = extract_swiftui_structure(
+                child,
+                source,
+                file,
+                module_path,
+                body_id,
+                body_id,
+                result,
+            );
         }
     }
 }
@@ -1719,7 +1901,7 @@ fn file_matches(node_file: &Path, file_path: &Path) -> bool {
 }
 
 fn line_matches(node_line: usize, ast_row_zero_based: usize) -> bool {
-    node_line == ast_row_zero_based || node_line == ast_row_zero_based + 1
+    node_line.abs_diff(ast_row_zero_based) <= 1
 }
 
 fn collect_swiftui_body_nodes<'a>(
@@ -2155,6 +2337,146 @@ mod tests {
             &for_each.id,
             EdgeKind::Contains
         ));
+    }
+
+    #[test]
+    fn extracts_swiftui_structure_through_modifier_chains_and_view_refs() {
+        let result = extract(
+            r#"
+            import SwiftUI
+
+            struct InlinePanel: View {
+                var body: some View { Text("Inline") }
+            }
+
+            struct OverlayPanel: View {
+                var body: some View { Text("Overlay") }
+            }
+
+            struct ContentView: View {
+                var chatRoomFragViewPanel: some View {
+                    InlinePanel()
+                }
+
+                var exitPopView: some View {
+                    Text("Exit")
+                }
+
+                var body: some View {
+                    NavigationStack {
+                        if showDetails {
+                            InlinePanel()
+                                .onReceive(events) { _ in
+                                    switch mode {
+                                    case .loading:
+                                        helper()
+                                    default:
+                                        break
+                                    }
+                                }
+                        }
+
+                        chatRoomFragViewPanel
+                        DialogStreamView()
+                        exitPopView
+                    }
+                    .frame(width: 100)
+                    .overlay {
+                        OverlayPanel()
+                    }
+                    .onReceive(events) { _ in
+                        switch mode {
+                        case .done:
+                            helper()
+                        default:
+                            break
+                        }
+                    }
+                }
+            }
+            "#,
+        );
+
+        let body = result
+            .nodes
+            .iter()
+            .find(|n| n.id == "test.swift::ContentView::body")
+            .expect("content body node should exist");
+        let nav = result
+            .nodes
+            .iter()
+            .find(|n| n.kind == NodeKind::View && n.name == "NavigationStack")
+            .expect("NavigationStack synthetic view should exist");
+        let if_branch = result
+            .nodes
+            .iter()
+            .find(|n| n.kind == NodeKind::Branch && n.name == "if showDetails")
+            .expect("if branch should exist");
+        let inline_panel = result
+            .nodes
+            .iter()
+            .find(|n| n.kind == NodeKind::View && n.name == "InlinePanel")
+            .expect("InlinePanel view should exist");
+        let chat_panel = result
+            .nodes
+            .iter()
+            .find(|n| n.kind == NodeKind::View && n.name == "chatRoomFragViewPanel")
+            .expect("chatRoomFragViewPanel view ref should exist");
+        let exit_pop = result
+            .nodes
+            .iter()
+            .find(|n| n.kind == NodeKind::View && n.name == "exitPopView")
+            .expect("exitPopView view ref should exist");
+        let dialog_stream = result
+            .nodes
+            .iter()
+            .find(|n| n.kind == NodeKind::View && n.name == "DialogStreamView")
+            .expect("DialogStreamView should exist");
+        let overlay_panel = result
+            .nodes
+            .iter()
+            .find(|n| n.kind == NodeKind::View && n.name == "OverlayPanel")
+            .expect("OverlayPanel should exist");
+
+        assert!(has_edge(&result, &body.id, &nav.id, EdgeKind::Contains));
+        assert!(has_edge(
+            &result,
+            &nav.id,
+            &if_branch.id,
+            EdgeKind::Contains
+        ));
+        assert!(has_edge(
+            &result,
+            &if_branch.id,
+            &inline_panel.id,
+            EdgeKind::Contains
+        ));
+        assert!(has_edge(
+            &result,
+            &nav.id,
+            &chat_panel.id,
+            EdgeKind::Contains
+        ));
+        assert!(has_edge(&result, &nav.id, &exit_pop.id, EdgeKind::Contains));
+        assert!(has_edge(
+            &result,
+            &nav.id,
+            &dialog_stream.id,
+            EdgeKind::Contains
+        ));
+        assert!(has_edge(
+            &result,
+            &nav.id,
+            &overlay_panel.id,
+            EdgeKind::Contains
+        ));
+        assert!(
+            result
+                .nodes
+                .iter()
+                .all(|n| !(n.kind == NodeKind::Branch && n.name == "switch mode")),
+            "non-view modifier closures should not become structural branches"
+        );
     }
 
     #[test]
