@@ -1731,7 +1731,7 @@ fn emit_swiftui_call_reference(
             provenance: node_edge_provenance(file, node, &view_id),
         },
     );
-    for lambda in call_suffix_lambda_children(node) {
+    for lambda in structural_call_suffix_lambda_children(node, source) {
         let _ = extract_swiftui_structure(
             lambda,
             source,
@@ -1745,7 +1745,58 @@ fn emit_swiftui_call_reference(
     Some(view_id)
 }
 
-fn call_suffix_lambda_children(node: tree_sitter::Node) -> Vec<tree_sitter::Node> {
+#[derive(Clone)]
+struct SwiftUiLambdaChild<'a> {
+    node: tree_sitter::Node<'a>,
+    label: Option<String>,
+}
+
+fn trailing_closure_label_before(source: &[u8], lambda_start_byte: usize) -> Option<String> {
+    let window_start = lambda_start_byte.saturating_sub(128);
+    let text = std::str::from_utf8(&source[window_start..lambda_start_byte])
+        .ok()?
+        .trim_end();
+    let colon_index = text.rfind(':')?;
+    if !text[colon_index + 1..].trim().is_empty() {
+        return None;
+    }
+
+    let before_colon = text[..colon_index].trim_end();
+    let label_start = before_colon
+        .rfind(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+        .map(|index| index + 1)
+        .unwrap_or(0);
+    let label = before_colon[label_start..].trim();
+    if label.is_empty() {
+        None
+    } else {
+        Some(label.to_string())
+    }
+}
+
+fn is_view_builder_label(label: &str) -> bool {
+    let lower = label.to_ascii_lowercase();
+    matches!(
+        lower.as_str(),
+        "label"
+            | "header"
+            | "footer"
+            | "background"
+            | "overlay"
+            | "placeholder"
+            | "leading"
+            | "trailing"
+            | "detail"
+            | "sidebar"
+            | "top"
+            | "bottom"
+    ) || lower.contains("content")
+}
+
+fn call_suffix_lambda_children<'a>(
+    node: tree_sitter::Node<'a>,
+    source: &'a [u8],
+) -> Vec<SwiftUiLambdaChild<'a>> {
     let mut suffixes = Vec::new();
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
@@ -1753,12 +1804,33 @@ fn call_suffix_lambda_children(node: tree_sitter::Node) -> Vec<tree_sitter::Node
             let mut suffix_cursor = child.walk();
             for suffix_child in child.named_children(&mut suffix_cursor) {
                 if suffix_child.kind() == "lambda_literal" {
-                    suffixes.push(suffix_child);
+                    let label = trailing_closure_label_before(source, suffix_child.start_byte());
+                    suffixes.push(SwiftUiLambdaChild {
+                        node: suffix_child,
+                        label,
+                    });
                 }
             }
         }
     }
     suffixes
+}
+
+fn structural_call_suffix_lambda_children<'a>(
+    node: tree_sitter::Node<'a>,
+    source: &'a [u8],
+) -> Vec<tree_sitter::Node<'a>> {
+    let lambdas = call_suffix_lambda_children(node, source);
+    let has_labeled = lambdas.iter().any(|child| child.label.is_some());
+
+    lambdas
+        .into_iter()
+        .filter(|child| match child.label.as_deref() {
+            Some(label) => is_view_builder_label(label),
+            None => !has_labeled,
+        })
+        .map(|child| child.node)
+        .collect()
 }
 
 fn recurse_swiftui_named_children(
@@ -1978,7 +2050,7 @@ fn extract_swiftui_structure(
                         },
                     );
                 }
-                for lambda in call_suffix_lambda_children(node) {
+                for lambda in structural_call_suffix_lambda_children(node, source) {
                     let _ = extract_swiftui_structure(
                         lambda,
                         source,
@@ -2008,7 +2080,7 @@ fn extract_swiftui_structure(
                     } else {
                         anchors.clone()
                     };
-                    for lambda in call_suffix_lambda_children(node) {
+                    for lambda in structural_call_suffix_lambda_children(node, source) {
                         for anchor in &modifier_parents {
                             let _ = extract_swiftui_structure(
                                 lambda,
@@ -3054,6 +3126,70 @@ mod tests {
             &helper_text.id,
             EdgeKind::Contains
         ));
+    }
+
+    #[test]
+    fn excludes_action_closures_from_structural_view_tree() {
+        let result = extract(
+            r#"
+            import SwiftUI
+
+            struct ExitPopView: View {
+                let dismissPopView: () -> Void
+                let exit: () -> Void
+                let minimize: () -> Void
+
+                var body: some View {
+                    VStack {
+                        Button {
+                            minimize()
+                        } label: {
+                            Text("Minimize")
+                        }
+                    }
+                    .onTapGesture {
+                        dismissPopView()
+                    }
+                }
+            }
+
+            struct ContentView: View {
+                @State private var exitPopShow = true
+
+                var body: some View {
+                    if exitPopShow {
+                        ExitPopView {
+                            exitPopShow = false
+                        } exit: {
+                            handleExitRoom()
+                        } minimize: {
+                            handleMinimizeRoom()
+                        }
+                    }
+                }
+
+                func handleExitRoom() {}
+                func handleMinimizeRoom() {}
+            }
+            "#,
+        );
+
+        assert!(
+            result.nodes.iter().all(|node| !(node.kind == NodeKind::View
+                && matches!(
+                    node.name.as_str(),
+                    "handleExitRoom" | "handleMinimizeRoom" | "minimize" | "dismissPopView"
+                ))),
+            "action closures should not emit structural view nodes"
+        );
+
+        assert!(
+            result
+                .nodes
+                .iter()
+                .any(|node| node.kind == NodeKind::View && node.name == "Text"),
+            "builder-like label closures should still be traversed"
+        );
     }
 
     #[test]
