@@ -252,7 +252,8 @@ mod tests {
         catalogs.insert(LocalizationCatalogRecord {
             table: "Localizable".to_string(),
             key: "welcome_title".to_string(),
-            file: "Localizable.xcstrings".to_string(),
+            catalog_file: "Localizable.xcstrings".to_string(),
+            catalog_dir: ".".to_string(),
             source_language: "en".to_string(),
             source_value: "Welcome".to_string(),
             status: "translated".to_string(),

@@ -65,7 +65,7 @@ pub fn query_usages(
                 let matched_reference = resolution.matches.into_iter().find_map(|item| {
                     (item.record.table == record.table
                         && item.record.key == record.key
-                        && item.record.file == record.file)
+                        && item.record.catalog_file == record.catalog_file)
                         .then_some(item.reference)
                 })?;
 

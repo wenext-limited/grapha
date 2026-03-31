@@ -421,7 +421,7 @@ pub fn render_localize_with_options(result: &LocalizeResult, options: RenderOpti
                         "{}.{} {}",
                         item.record.table,
                         item.record.key,
-                        Palette::new(options).file(format!("({})", item.record.file))
+                        Palette::new(options).file(format!("({})", item.record.catalog_file))
                     ),
                     options,
                 )));
@@ -552,7 +552,7 @@ pub fn render_usages_with_options(result: &UsagesResult, options: RenderOptions)
                 "{} {}",
                 Palette::new(options)
                     .symbol_name(format!("{}.{}", record.record.table, record.record.key)),
-                Palette::new(options).file(format!("({})", record.record.file))
+                Palette::new(options).file(format!("({})", record.record.catalog_file))
             ),
             usage_children,
         ));

@@ -669,8 +669,9 @@ fn main() -> anyhow::Result<()> {
                 load_existing_graph(&format, &store_path)?
             };
 
-            // Run store sync and search sync in parallel — they're independent
+            // Run store sync, search sync, and localization snapshot build in parallel.
             let search_index_path = store_path.join("search_index");
+            let index_root = path.clone();
             let save_result = std::thread::scope(|scope| {
                 let save_handle = scope.spawn(|| {
                     let t = Instant::now();
@@ -700,11 +701,22 @@ fn main() -> anyhow::Result<()> {
                     Ok::<_, anyhow::Error>((t, stats))
                 });
 
+                let localization_handle = scope.spawn(|| {
+                    let t = Instant::now();
+                    let count =
+                        localization::build_and_save_catalog_snapshot(&index_root, &store_path)?;
+                    Ok::<_, anyhow::Error>((t, count))
+                });
+
                 let save = save_handle.join().expect("save thread panicked")?;
                 let search = search_handle.join().expect("search thread panicked")?;
-                Ok::<_, anyhow::Error>((save, search))
+                let localization = localization_handle
+                    .join()
+                    .expect("localization thread panicked")?;
+                Ok::<_, anyhow::Error>((save, search, localization))
             });
-            let ((save_t, save_stats), (search_t, search_stats)) = save_result?;
+            let ((save_t, save_stats), (search_t, search_stats), (localize_t, localize_count)) =
+                save_result?;
             progress::done(
                 &format!(
                     "saved to {} ({}; {})",
@@ -717,6 +729,10 @@ fn main() -> anyhow::Result<()> {
             progress::done(
                 &format!("built search index ({})", search_stats.summary()),
                 search_t,
+            );
+            progress::done(
+                &format!("saved localization snapshot ({} records)", localize_count),
+                localize_t,
             );
 
             progress::summary(&format!(

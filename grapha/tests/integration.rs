@@ -1,5 +1,6 @@
 use assert_cmd::Command;
 use predicates::prelude::*;
+use serde_json::Value;
 
 fn grapha() -> Command {
     Command::cargo_bin("grapha").unwrap()
@@ -207,6 +208,7 @@ fn index_creates_sqlite_db() {
         .stderr(predicate::str::contains("indexed"));
 
     assert!(store_dir.join("grapha.db").exists());
+    assert!(store_dir.join("localization.json").exists());
 }
 
 #[test]
@@ -227,6 +229,7 @@ fn index_json_format() {
         .success();
 
     assert!(store_dir.join("graph.json").exists());
+    assert!(store_dir.join("localization.json").exists());
 }
 
 #[test]
@@ -285,21 +288,37 @@ fn localize_and_usages_commands_resolve_swiftui_xcstrings() {
         .assert()
         .success();
 
-    grapha()
+    assert!(store_dir.join("localization.json").exists());
+    std::fs::remove_file(dir.path().join("Localizable.xcstrings")).unwrap();
+
+    let localize_output = grapha()
         .args(["localize", "body", "-p", dir.path().to_str().unwrap()])
         .assert()
         .success()
-        .stdout(predicate::str::contains(
-            "\"key\": \"account_forget_password\"",
-        ))
-        .stdout(predicate::str::contains(
-            "\"source_value\": \"Forgot Password\"",
-        ))
-        .stdout(predicate::str::contains(
-            "\"wrapper_name\": \"accountForgetPassword\"",
-        ));
+        .get_output()
+        .stdout
+        .clone();
+    let localize: Value = serde_json::from_slice(&localize_output).unwrap();
+    let matches = localize["matches"].as_array().unwrap();
+    assert_eq!(matches.len(), 1);
+    assert_eq!(
+        matches[0]["record"]["key"].as_str(),
+        Some("account_forget_password")
+    );
+    assert_eq!(
+        matches[0]["record"]["catalog_file"].as_str(),
+        Some("Localizable.xcstrings")
+    );
+    assert_eq!(
+        matches[0]["record"]["source_value"].as_str(),
+        Some("Forgot Password")
+    );
+    assert_eq!(
+        matches[0]["reference"]["wrapper_name"].as_str(),
+        Some("accountForgetPassword")
+    );
 
-    grapha()
+    let usages_output = grapha()
         .args([
             "usages",
             "account_forget_password",
@@ -310,24 +329,37 @@ fn localize_and_usages_commands_resolve_swiftui_xcstrings() {
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("\"name\": \"body\""))
-        .stdout(predicate::str::contains("\"name\": \"Text\""))
-        .stdout(predicate::str::contains(
-            "\"wrapper_name\": \"accountForgetPassword\"",
-        ));
+        .get_output()
+        .stdout
+        .clone();
+    let usages: Value = serde_json::from_slice(&usages_output).unwrap();
+    let usage_records = usages["records"].as_array().unwrap();
+    assert_eq!(usage_records.len(), 1);
+    let usage_sites = usage_records[0]["usages"].as_array().unwrap();
+    assert_eq!(usage_sites.len(), 1);
+    assert_eq!(usage_sites[0]["owner"]["name"].as_str(), Some("body"));
+    assert_eq!(usage_sites[0]["view"]["name"].as_str(), Some("Text"));
+    assert_eq!(
+        usage_sites[0]["reference"]["wrapper_name"].as_str(),
+        Some("accountForgetPassword")
+    );
 }
 
 #[test]
-fn usages_groups_duplicate_keys_across_catalogs() {
+fn localize_and_usages_prefer_nearest_duplicate_catalog() {
     let dir = tempfile::tempdir().unwrap();
     let store_dir = dir.path().join(".grapha");
+    let auth_sources = dir.path().join("Packages/Auth/Sources/Auth");
+    let profile_sources = dir.path().join("Packages/Profile/Sources/Profile");
+    std::fs::create_dir_all(&auth_sources).unwrap();
+    std::fs::create_dir_all(&profile_sources).unwrap();
 
     std::fs::write(
-        dir.path().join("ContentView.swift"),
+        auth_sources.join("AuthView.swift"),
         r#"
         import SwiftUI
 
-        struct ContentView: View {
+        struct AuthView: View {
             var body: some View {
                 VStack {
                     Text(.sharedTitle)
@@ -339,7 +371,7 @@ fn usages_groups_duplicate_keys_across_catalogs() {
     .unwrap();
 
     std::fs::write(
-        dir.path().join("Strings.generated.swift"),
+        auth_sources.join("Strings.generated.swift"),
         r#"
         import Foundation
 
@@ -357,16 +389,16 @@ fn usages_groups_duplicate_keys_across_catalogs() {
     .unwrap();
 
     write_localizable_fixture(
-        &dir.path().join("Localizable.xcstrings"),
+        &dir.path().join("Packages/Auth/Localizable.xcstrings"),
         "shared_title",
-        "Shared",
-        "Default catalog",
+        "Auth Shared",
+        "Auth catalog",
     );
     write_localizable_fixture(
-        &dir.path().join("Alternate.xcstrings"),
+        &dir.path().join("Packages/Profile/Localizable.xcstrings"),
         "shared_title",
-        "Shared Alt",
-        "Alternate catalog",
+        "Profile Shared",
+        "Profile catalog",
     );
 
     grapha()
@@ -379,12 +411,66 @@ fn usages_groups_duplicate_keys_across_catalogs() {
         .assert()
         .success();
 
-    grapha()
-        .args(["usages", "shared_title", "-p", dir.path().to_str().unwrap()])
+    let localize_output = grapha()
+        .args(["localize", "AuthView", "-p", dir.path().to_str().unwrap()])
         .assert()
         .success()
-        .stdout(predicate::str::contains("\"table\": \"Localizable\""))
-        .stdout(predicate::str::contains("\"table\": \"Alternate\""));
+        .get_output()
+        .stdout
+        .clone();
+    let localize: Value = serde_json::from_slice(&localize_output).unwrap();
+    let matches = localize["matches"].as_array().unwrap();
+    assert_eq!(matches.len(), 1);
+    assert_eq!(
+        matches[0]["record"]["catalog_file"].as_str(),
+        Some("Packages/Auth/Localizable.xcstrings")
+    );
+    assert_eq!(
+        matches[0]["record"]["source_value"].as_str(),
+        Some("Auth Shared")
+    );
+
+    let usages_output = grapha()
+        .args([
+            "usages",
+            "shared_title",
+            "--table",
+            "Localizable",
+            "-p",
+            dir.path().to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let usages: Value = serde_json::from_slice(&usages_output).unwrap();
+    let usage_records = usages["records"].as_array().unwrap();
+    assert_eq!(usage_records.len(), 2);
+
+    let auth_record = usage_records
+        .iter()
+        .find(|record| {
+            record["record"]["catalog_file"].as_str() == Some("Packages/Auth/Localizable.xcstrings")
+        })
+        .expect("auth catalog should be present");
+    assert_eq!(auth_record["usages"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        auth_record["usages"][0]["owner"]["file"].as_str(),
+        Some("Packages/Auth/Sources/Auth/AuthView.swift")
+    );
+
+    let profile_record = usage_records
+        .iter()
+        .find(|record| {
+            record["record"]["catalog_file"].as_str()
+                == Some("Packages/Profile/Localizable.xcstrings")
+        })
+        .expect("profile catalog should be present");
+    assert!(
+        profile_record["usages"].as_array().unwrap().is_empty(),
+        "farther duplicate catalog should not claim the AuthView usage"
+    );
 }
 
 #[test]

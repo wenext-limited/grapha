@@ -1,11 +1,12 @@
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::ffi::OsString;
+use std::path::{Component, Path, PathBuf};
 
-use anyhow::Context;
+use anyhow::{Context, bail};
 use grapha_core::graph::{Edge, EdgeKind, Graph, Node};
 use langcodec::Codec;
 use langcodec::types::Translation;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 const META_REF_KIND: &str = "l10n.ref_kind";
 const META_WRAPPER_NAME: &str = "l10n.wrapper_name";
@@ -19,17 +20,40 @@ const META_WRAPPER_TABLE: &str = "l10n.wrapper.table";
 const META_WRAPPER_KEY: &str = "l10n.wrapper.key";
 const META_WRAPPER_FALLBACK: &str = "l10n.wrapper.fallback";
 const META_WRAPPER_ARG_COUNT: &str = "l10n.wrapper.arg_count";
+const LOCALIZATION_SNAPSHOT_VERSION: &str = "1";
+const LOCALIZATION_SNAPSHOT_FILE: &str = "localization.json";
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LocalizationCatalogRecord {
     pub table: String,
     pub key: String,
-    pub file: String,
+    pub catalog_file: String,
+    pub catalog_dir: String,
     pub source_language: String,
     pub source_value: String,
     pub status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub comment: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct LocalizationSnapshot {
+    version: String,
+    records: Vec<LocalizationCatalogRecord>,
+}
+
+impl LocalizationSnapshot {
+    fn new(mut records: Vec<LocalizationCatalogRecord>) -> Self {
+        sort_records(&mut records);
+        Self {
+            version: LOCALIZATION_SNAPSHOT_VERSION.to_string(),
+            records,
+        }
+    }
+
+    fn record_count(&self) -> usize {
+        self.records.len()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -99,6 +123,15 @@ impl LocalizationCatalogIndex {
         self.records.push(record);
     }
 
+    pub(crate) fn from_records(mut records: Vec<LocalizationCatalogRecord>) -> Self {
+        sort_records(&mut records);
+        let mut index = Self::default();
+        for record in records {
+            index.insert(record);
+        }
+        index
+    }
+
     pub fn records_for(&self, table: &str, key: &str) -> Vec<LocalizationCatalogRecord> {
         self.by_table_key
             .get(&(table.to_string(), key.to_string()))
@@ -120,10 +153,32 @@ impl LocalizationCatalogIndex {
     }
 }
 
-pub fn load_catalog_index(root: &Path) -> anyhow::Result<LocalizationCatalogIndex> {
-    let files = crate::discover::discover_files(root, &["xcstrings"])?;
-    let mut index = LocalizationCatalogIndex::default();
+pub fn build_and_save_catalog_snapshot(root: &Path, store_dir: &Path) -> anyhow::Result<usize> {
+    let snapshot = build_catalog_snapshot(root)?;
+    let count = snapshot.record_count();
+    save_catalog_snapshot(store_dir, &snapshot)?;
+    Ok(count)
+}
 
+pub fn load_catalog_index(project_root: &Path) -> anyhow::Result<LocalizationCatalogIndex> {
+    load_catalog_index_from_store(&project_root.join(".grapha"))
+}
+
+pub(crate) fn load_catalog_index_from_store(
+    store_dir: &Path,
+) -> anyhow::Result<LocalizationCatalogIndex> {
+    let snapshot = load_catalog_snapshot(store_dir)?;
+    Ok(LocalizationCatalogIndex::from_records(snapshot.records))
+}
+
+fn build_catalog_snapshot(root: &Path) -> anyhow::Result<LocalizationSnapshot> {
+    if root.is_file() {
+        return Ok(LocalizationSnapshot::new(Vec::new()));
+    }
+
+    let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let files = crate::discover::discover_files(&root, &["xcstrings"])?;
+    let mut records = Vec::new();
     for file in files {
         let mut codec = Codec::new();
         codec
@@ -139,13 +194,18 @@ pub fn load_catalog_index(root: &Path) -> anyhow::Result<LocalizationCatalogInde
             .and_then(|stem| stem.to_str())
             .unwrap_or("Localizable")
             .to_string();
-        let file_string = file.to_string_lossy().to_string();
+        let catalog_file = path_relative_to_root(&root, &file);
+        let catalog_dir = catalog_file
+            .parent()
+            .map(path_to_snapshot_string)
+            .unwrap_or_else(|| ".".to_string());
 
         for entry in &source_resource.entries {
-            index.insert(LocalizationCatalogRecord {
+            records.push(LocalizationCatalogRecord {
                 table: table.clone(),
                 key: entry.id.clone(),
-                file: file_string.clone(),
+                catalog_file: path_to_snapshot_string(&catalog_file),
+                catalog_dir: catalog_dir.clone(),
                 source_language: source_language.clone(),
                 source_value: translation_plain_string(&entry.value),
                 status: serde_json::to_string(&entry.status)
@@ -157,7 +217,42 @@ pub fn load_catalog_index(root: &Path) -> anyhow::Result<LocalizationCatalogInde
         }
     }
 
-    Ok(index)
+    Ok(LocalizationSnapshot::new(records))
+}
+
+fn save_catalog_snapshot(store_dir: &Path, snapshot: &LocalizationSnapshot) -> anyhow::Result<()> {
+    std::fs::create_dir_all(store_dir)
+        .with_context(|| format!("failed to create store dir {}", store_dir.display()))?;
+    let path = catalog_snapshot_path(store_dir);
+    let payload = serde_json::to_string_pretty(snapshot)?;
+    std::fs::write(&path, payload)
+        .with_context(|| format!("failed to write {}", path.display()))?;
+    Ok(())
+}
+
+fn load_catalog_snapshot(store_dir: &Path) -> anyhow::Result<LocalizationSnapshot> {
+    let path = catalog_snapshot_path(store_dir);
+    if !path.exists() {
+        bail!("no localization index found — run `grapha index` first");
+    }
+
+    let payload = std::fs::read_to_string(&path)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    let snapshot: LocalizationSnapshot = serde_json::from_str(&payload)
+        .with_context(|| format!("failed to parse {}", path.display()))?;
+    if snapshot.version != LOCALIZATION_SNAPSHOT_VERSION {
+        bail!(
+            "unsupported localization snapshot version: {} (expected {})",
+            snapshot.version,
+            LOCALIZATION_SNAPSHOT_VERSION
+        );
+    }
+
+    Ok(snapshot)
+}
+
+fn catalog_snapshot_path(store_dir: &Path) -> PathBuf {
+    store_dir.join(LOCALIZATION_SNAPSHOT_FILE)
 }
 
 fn source_resource_for_codec(codec: &Codec) -> Option<&langcodec::types::Resource> {
@@ -182,6 +277,88 @@ fn source_resource_for_codec(codec: &Codec) -> Option<&langcodec::types::Resourc
 
 fn translation_plain_string(value: &Translation) -> String {
     value.plain_translation_string()
+}
+
+fn path_relative_to_root(root: &Path, path: &Path) -> PathBuf {
+    path.strip_prefix(root).unwrap_or(path).to_path_buf()
+}
+
+fn path_to_snapshot_string(path: &Path) -> String {
+    let value = path.to_string_lossy();
+    if value.is_empty() {
+        ".".to_string()
+    } else {
+        value.to_string()
+    }
+}
+
+fn sort_records(records: &mut [LocalizationCatalogRecord]) {
+    records.sort_by(|left, right| {
+        left.table
+            .cmp(&right.table)
+            .then_with(|| left.key.cmp(&right.key))
+            .then_with(|| left.catalog_file.cmp(&right.catalog_file))
+            .then_with(|| left.source_language.cmp(&right.source_language))
+    });
+}
+
+fn closest_records(
+    usage_file: &Path,
+    candidates: Vec<LocalizationCatalogRecord>,
+) -> Vec<LocalizationCatalogRecord> {
+    if candidates.is_empty() {
+        return Vec::new();
+    }
+
+    let mut ranked: Vec<(usize, LocalizationCatalogRecord)> = candidates
+        .into_iter()
+        .map(|record| (directory_distance(usage_file, &record.catalog_dir), record))
+        .collect();
+    ranked.sort_by(
+        |(left_distance, left_record), (right_distance, right_record)| {
+            left_distance
+                .cmp(right_distance)
+                .then_with(|| left_record.catalog_file.cmp(&right_record.catalog_file))
+                .then_with(|| left_record.table.cmp(&right_record.table))
+                .then_with(|| left_record.key.cmp(&right_record.key))
+        },
+    );
+
+    let Some(best_distance) = ranked.first().map(|(distance, _)| *distance) else {
+        return Vec::new();
+    };
+
+    ranked
+        .into_iter()
+        .take_while(|(distance, _)| *distance == best_distance)
+        .map(|(_, record)| record)
+        .collect()
+}
+
+fn directory_distance(usage_file: &Path, catalog_dir: &str) -> usize {
+    let usage_dir = usage_file.parent().unwrap_or_else(|| Path::new("."));
+    let usage_components = normalized_components(usage_dir);
+    let catalog_components = normalized_components(Path::new(catalog_dir));
+
+    let common_prefix = usage_components
+        .iter()
+        .zip(&catalog_components)
+        .take_while(|(left, right)| left == right)
+        .count();
+
+    (usage_components.len() - common_prefix) + (catalog_components.len() - common_prefix)
+}
+
+fn normalized_components(path: &Path) -> Vec<OsString> {
+    path.components()
+        .filter_map(|component| match component {
+            Component::CurDir => None,
+            Component::Normal(value) => Some(value.to_os_string()),
+            Component::ParentDir => Some(OsString::from("..")),
+            Component::RootDir => Some(OsString::from("/")),
+            Component::Prefix(prefix) => Some(prefix.as_os_str().to_os_string()),
+        })
+        .collect()
 }
 
 pub fn localization_usage_nodes<'a>(graph: &'a Graph) -> Vec<&'a Node> {
@@ -251,10 +428,10 @@ pub fn resolve_usage(
         base_reference.table.as_deref(),
         base_reference.key.as_deref(),
     ) {
-        for record in catalogs.records_for(table, key) {
+        for record in closest_records(&usage_node.file, catalogs.records_for(table, key)) {
             let dedupe_key = (
                 String::new(),
-                record.file.clone(),
+                record.catalog_file.clone(),
                 record.table.clone(),
                 record.key.clone(),
             );
@@ -280,7 +457,10 @@ pub fn resolve_usage(
                 continue;
             };
 
-            for record in catalogs.records_for(&binding.table, &binding.key) {
+            for record in closest_records(
+                &usage_node.file,
+                catalogs.records_for(&binding.table, &binding.key),
+            ) {
                 let mut reference = base_reference.clone();
                 reference.wrapper_symbol = Some(wrapper_node.id.clone());
                 reference.table = Some(binding.table.clone());
@@ -294,7 +474,7 @@ pub fn resolve_usage(
 
                 let dedupe_key = (
                     wrapper_node.id.clone(),
-                    record.file.clone(),
+                    record.catalog_file.clone(),
                     record.table.clone(),
                     record.key.clone(),
                 );
@@ -352,8 +532,9 @@ mod tests {
     use std::fs;
 
     #[test]
-    fn loads_xcstrings_catalog_records() {
+    fn builds_and_loads_localization_snapshot() {
         let dir = tempfile::tempdir().unwrap();
+        let store_dir = dir.path().join(".grapha");
         let file = dir.path().join("Localizable.xcstrings");
         fs::write(
             &file,
@@ -377,14 +558,104 @@ mod tests {
         )
         .unwrap();
 
-        let index = load_catalog_index(dir.path()).unwrap();
+        let count = build_and_save_catalog_snapshot(dir.path(), &store_dir).unwrap();
+        assert_eq!(count, 1);
+        assert!(store_dir.join("localization.json").exists());
+
+        let index = load_catalog_index_from_store(&store_dir).unwrap();
         let records = index.records_for("Localizable", "welcome_title");
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].source_value, "Welcome");
         assert_eq!(records[0].status, "translated");
+        assert_eq!(records[0].catalog_file, "Localizable.xcstrings");
+        assert_eq!(records[0].catalog_dir, ".");
         assert_eq!(
             records[0].comment.as_deref(),
             Some("Shown on the welcome screen")
         );
+    }
+
+    #[test]
+    fn rejects_unsupported_snapshot_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let store_dir = dir.path().join(".grapha");
+        fs::create_dir_all(&store_dir).unwrap();
+        fs::write(
+            store_dir.join("localization.json"),
+            r#"{"version":"999","records":[]}"#,
+        )
+        .unwrap();
+
+        let error = load_catalog_index_from_store(&store_dir).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported localization snapshot version"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn closest_records_prefers_nearest_catalog() {
+        let candidates = vec![
+            LocalizationCatalogRecord {
+                table: "Localizable".to_string(),
+                key: "shared_title".to_string(),
+                catalog_file: "Features/Auth/Localizable.xcstrings".to_string(),
+                catalog_dir: "Features/Auth".to_string(),
+                source_language: "en".to_string(),
+                source_value: "Auth".to_string(),
+                status: "translated".to_string(),
+                comment: None,
+            },
+            LocalizationCatalogRecord {
+                table: "Localizable".to_string(),
+                key: "shared_title".to_string(),
+                catalog_file: "Features/Profile/Localizable.xcstrings".to_string(),
+                catalog_dir: "Features/Profile".to_string(),
+                source_language: "en".to_string(),
+                source_value: "Profile".to_string(),
+                status: "translated".to_string(),
+                comment: None,
+            },
+        ];
+
+        let matches = closest_records(
+            Path::new("Features/Auth/Sources/Login/ContentView.swift"),
+            candidates,
+        );
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].source_value, "Auth");
+    }
+
+    #[test]
+    fn closest_records_keep_equal_distance_ties() {
+        let candidates = vec![
+            LocalizationCatalogRecord {
+                table: "Localizable".to_string(),
+                key: "shared_title".to_string(),
+                catalog_file: "Features/A/Localizable.xcstrings".to_string(),
+                catalog_dir: "Features/A".to_string(),
+                source_language: "en".to_string(),
+                source_value: "A".to_string(),
+                status: "translated".to_string(),
+                comment: None,
+            },
+            LocalizationCatalogRecord {
+                table: "Localizable".to_string(),
+                key: "shared_title".to_string(),
+                catalog_file: "Features/B/Localizable.xcstrings".to_string(),
+                catalog_dir: "Features/B".to_string(),
+                source_language: "en".to_string(),
+                source_value: "B".to_string(),
+                status: "translated".to_string(),
+                comment: None,
+            },
+        ];
+
+        let matches = closest_records(Path::new("Features/Common/ContentView.swift"), candidates);
+        assert_eq!(matches.len(), 2);
+        assert_eq!(matches[0].catalog_file, "Features/A/Localizable.xcstrings");
+        assert_eq!(matches[1].catalog_file, "Features/B/Localizable.xcstrings");
     }
 }
