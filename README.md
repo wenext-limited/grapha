@@ -4,7 +4,7 @@
 
 Blazingly fast code intelligence for LLM agents and developer tooling.
 
-Grapha transforms source code into a normalized, graph-based representation with compiler-grade accuracy. For Swift, it reads Xcode's pre-built index store via a binary FFI bridge for fully type-resolved symbol graphs, falling back to tree-sitter for instant parsing without a build. The resulting graph provides persistence, search, dataflow tracing, and impact analysis — giving agents and developers structured access to codebases at scale.
+Grapha transforms source code into a normalized, graph-based representation with compiler-grade accuracy. For Swift, it reads Xcode's pre-built index store via a binary FFI bridge for fully type-resolved symbol graphs, falling back to tree-sitter for instant parsing without a build. The resulting graph provides persistence, incremental search/index sync, dataflow tracing, semantic effect graphs, and impact analysis — giving agents and developers structured access to codebases at scale.
 
 > **1,991 Swift files — 123K nodes, 766K edges — indexed in 6 seconds.**
 
@@ -37,8 +37,11 @@ Tested on a production iOS app (1,991 Swift files, ~300K lines):
 ## Features
 
 - **Compiler-grade accuracy** — reads Xcode's pre-built index store for 100% type-resolved call graphs (Swift). Falls back to tree-sitter for instant parsing without a build.
+- **Incremental indexing** — SQLite storage and Tantivy search sync incrementally by default. Use `grapha index --full-rebuild` to force a cold rebuild.
 - **Dataflow tracing** — trace forward from entry points to terminal operations (network, persistence, cache). Trace backward from any symbol to affected entry points.
+- **Semantic dataflow graph** — derive a deduplicated effect graph from an entry point with `grapha dataflow`, including reads, writes, publishes, subscribes, and terminal side effects.
 - **Impact analysis** — BFS blast radius: "if I change this function, what breaks?"
+- **Provenance-aware change detection** — edges carry source spans, so `grapha changes` can attribute method-body edits even when declaration spans stay fixed.
 - **Entry point detection** — auto-detects SwiftUI Views, `@Observable` classes, `fn main()`, `#[test]` functions.
 - **Terminal classification** — recognizes network calls, persistence (GRDB, CoreData), cache (Kingfisher), analytics, and more. Extensible via `grapha.toml`.
 - **Cross-module resolution** — import-guided disambiguation with confidence scoring. Module-aware merging for multi-package projects.
@@ -72,6 +75,9 @@ grapha impact bootstrapGame --depth 5
 # Forward trace: entry point → terminal operations
 grapha trace bootstrapGame
 
+# Derived semantic effect graph
+grapha dataflow bootstrapGame --format tree
+
 # Reverse: which entry points reach this symbol?
 grapha reverse handleSendResult
 
@@ -90,9 +96,10 @@ grapha serve --port 8765
 grapha index .                         # Index project (SQLite)
 grapha index . --format json           # JSON output (debugging)
 grapha index . --store-dir /tmp/idx    # Custom storage
+grapha index . --full-rebuild          # Force full store/search rebuild
 ```
 
-Auto-discovers Xcode's index store from DerivedData for compiler-resolved symbols. Falls back to tree-sitter when no index is available.
+Auto-discovers Xcode's index store from DerivedData for compiler-resolved symbols. Falls back to tree-sitter when no index is available. SQLite storage and the search index sync incrementally by default when a compatible prior index exists.
 
 ### `grapha analyze` — One-shot extraction
 
@@ -126,6 +133,14 @@ grapha impact bootstrapGame --format tree
 grapha trace bootstrapGame             # Entry → service → terminal ops
 grapha trace sendMessage --depth 10
 grapha trace bootstrapGame --format tree
+```
+
+### `grapha dataflow` — Derived semantic effect graph
+
+```bash
+grapha dataflow bootstrapGame
+grapha dataflow sendMessage --depth 10
+grapha dataflow bootstrapGame --format tree
 ```
 
 ### `grapha reverse` — Entry point impact
@@ -228,6 +243,7 @@ Nodes represent symbols (functions, types, properties). Edges represent relation
 | `operation` | `fetch`, `save`, `publish`, `navigate`, etc. |
 | `condition` | Guard/if condition text (when call is conditional) |
 | `async_boundary` | Whether call crosses async boundary |
+| `provenance` | Source file/span evidence for the relationship |
 
 **Node roles:**
 - `entry_point` — SwiftUI View.body, @Observable methods, fn main, #[test]
@@ -262,7 +278,7 @@ The per-language crate architecture (`grapha-swift/`, future `grapha-java/`, etc
 
 ```bash
 cargo build                    # Build all workspace crates
-cargo test                     # Run all tests (213 tests)
+cargo test                     # Run all tests
 cargo build -p grapha-core     # Build shared types only
 cargo build -p grapha-swift    # Build Swift extractor
 cargo run -p grapha -- <cmd>   # Run the CLI
