@@ -374,7 +374,7 @@ fn extract_property_as_entry_point(
     if let Ok(text) = node.utf8_text(source) {
         extract_calls_from_text(text, file, module_path, &id, result);
     }
-    extract_swiftui_body_structure(node, source, file, module_path, &id, result);
+    extract_swiftui_declaration_structure(node, source, file, module_path, &id, result);
 }
 
 /// Extract a function with an optional entry point hint from parent (Observable).
@@ -696,6 +696,10 @@ fn extract_function(
             }
         }
     }
+
+    if declaration_returns_swiftui_view(node, source) {
+        extract_swiftui_declaration_structure(node, source, file, module_path, &id, result);
+    }
 }
 
 /// Extract property declaration.
@@ -745,6 +749,10 @@ fn extract_property(
         && let Ok(text) = node.utf8_text(source)
     {
         extract_calls_from_text(text, file, module_path, &id, result);
+    }
+
+    if declaration_returns_swiftui_view(node, source) {
+        extract_swiftui_declaration_structure(node, source, file, module_path, &id, result);
     }
 }
 
@@ -1352,6 +1360,11 @@ fn emit_swiftui_node(
     id
 }
 
+fn same_owner_member_id(owner_id: &str, name: &str) -> Option<String> {
+    let (owner_prefix, _) = owner_id.rsplit_once("::")?;
+    Some(format!("{owner_prefix}::{name}"))
+}
+
 fn uppercase_identifier(name: &str) -> bool {
     name.chars()
         .next()
@@ -1516,11 +1529,13 @@ fn emit_swiftui_view_reference(
         node,
     );
     if !is_builtin_swiftui_view(&name) {
+        let target_id = same_owner_member_id(owner_id, &name)
+            .unwrap_or_else(|| make_id(file, module_path, &name));
         emit_unique_edge(
             result,
             Edge {
                 source: view_id.clone(),
-                target: make_id(file, module_path, &name),
+                target: target_id,
                 kind: EdgeKind::TypeRef,
                 confidence: 0.85,
                 direction: None,
@@ -1528,6 +1543,58 @@ fn emit_swiftui_view_reference(
                 condition: None,
                 async_boundary: None,
             },
+        );
+    }
+    Some(view_id)
+}
+
+fn emit_swiftui_call_reference(
+    node: tree_sitter::Node,
+    source: &[u8],
+    file: &str,
+    module_path: &[String],
+    owner_id: &str,
+    parent_id: &str,
+    result: &mut ExtractionResult,
+) -> Option<String> {
+    let name = swiftui_call_name(node, source)?;
+    if uppercase_identifier(&name) {
+        return None;
+    }
+
+    let view_id = emit_swiftui_node(
+        result,
+        owner_id,
+        parent_id,
+        &name,
+        NodeKind::View,
+        file,
+        node,
+    );
+    let target_id =
+        same_owner_member_id(owner_id, &name).unwrap_or_else(|| make_id(file, module_path, &name));
+    emit_unique_edge(
+        result,
+        Edge {
+            source: view_id.clone(),
+            target: target_id,
+            kind: EdgeKind::TypeRef,
+            confidence: 0.85,
+            direction: None,
+            operation: None,
+            condition: None,
+            async_boundary: None,
+        },
+    );
+    for lambda in call_suffix_lambda_children(node) {
+        let _ = extract_swiftui_structure(
+            lambda,
+            source,
+            file,
+            module_path,
+            owner_id,
+            &view_id,
+            result,
         );
     }
     Some(view_id)
@@ -1810,6 +1877,16 @@ fn extract_swiftui_structure(
                     }
                 }
                 anchors
+            } else if let Some(view_id) = emit_swiftui_call_reference(
+                node,
+                source,
+                file,
+                module_path,
+                owner_id,
+                parent_id,
+                result,
+            ) {
+                vec![view_id]
             } else {
                 recurse_swiftui_named_children(
                     node,
@@ -1863,27 +1940,72 @@ fn extract_swiftui_structure(
     }
 }
 
-fn extract_swiftui_body_structure(
+fn extract_swiftui_declaration_structure(
     node: tree_sitter::Node,
     source: &[u8],
     file: &str,
     module_path: &[String],
-    body_id: &str,
+    decl_id: &str,
     result: &mut ExtractionResult,
 ) {
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
-        if child.kind() == "computed_property" {
+        if matches!(child.kind(), "computed_property" | "function_body") {
             let _ = extract_swiftui_structure(
                 child,
                 source,
                 file,
                 module_path,
-                body_id,
-                body_id,
+                decl_id,
+                decl_id,
                 result,
             );
         }
+    }
+}
+
+fn type_text_looks_like_swiftui_view(type_text: &str) -> bool {
+    let trimmed = type_text.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    if trimmed.starts_with("some View")
+        || trimmed.starts_with("any View")
+        || trimmed.starts_with("some SwiftUI.View")
+        || trimmed.starts_with("any SwiftUI.View")
+    {
+        return true;
+    }
+
+    let ident: String = trimmed
+        .chars()
+        .take_while(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '.' | '<' | '>'))
+        .collect();
+    let base = ident
+        .split('<')
+        .next()
+        .unwrap_or(&ident)
+        .rsplit('.')
+        .next()
+        .unwrap_or(&ident);
+    base == "View" || base.ends_with("View") || is_builtin_swiftui_view(base)
+}
+
+fn declaration_returns_swiftui_view(node: tree_sitter::Node, source: &[u8]) -> bool {
+    let Ok(text) = node.utf8_text(source) else {
+        return false;
+    };
+
+    match node.kind() {
+        "property_declaration" => text
+            .split_once(':')
+            .map(|(_, type_text)| type_text_looks_like_swiftui_view(type_text))
+            .unwrap_or(false),
+        "function_declaration" | "protocol_function_declaration" => text
+            .split_once("->")
+            .map(|(_, type_text)| type_text_looks_like_swiftui_view(type_text))
+            .unwrap_or(false),
+        _ => false,
     }
 }
 
@@ -1902,6 +2024,63 @@ fn file_matches(node_file: &Path, file_path: &Path) -> bool {
 
 fn line_matches(node_line: usize, ast_row_zero_based: usize) -> bool {
     node_line.abs_diff(ast_row_zero_based) <= 1
+}
+
+fn collect_swiftui_declaration_nodes<'a>(
+    node: tree_sitter::Node<'a>,
+    source: &[u8],
+    out: &mut Vec<tree_sitter::Node<'a>>,
+) {
+    if matches!(node.kind(), "property_declaration" | "function_declaration")
+        && declaration_returns_swiftui_view(node, source)
+    {
+        out.push(node);
+    }
+
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_swiftui_declaration_nodes(child, source, out);
+    }
+}
+
+fn declaration_name(node: tree_sitter::Node, source: &[u8]) -> Option<String> {
+    match node.kind() {
+        "property_declaration" => find_pattern_name(node, source),
+        "function_declaration" => simple_identifier_text(node, source),
+        "protocol_function_declaration" => simple_identifier_text(node, source),
+        _ => None,
+    }
+}
+
+fn declaration_kind(node: tree_sitter::Node) -> Option<NodeKind> {
+    match node.kind() {
+        "property_declaration" => Some(NodeKind::Property),
+        "function_declaration" | "protocol_function_declaration" => Some(NodeKind::Function),
+        _ => None,
+    }
+}
+
+fn matching_swiftui_declaration_id(
+    result: &ExtractionResult,
+    file_path: &Path,
+    decl_node: tree_sitter::Node,
+    source: &[u8],
+) -> Option<String> {
+    let decl_line = decl_node.start_position().row;
+    let decl_name = declaration_name(decl_node, source)?;
+    let decl_kind = declaration_kind(decl_node)?;
+
+    result
+        .nodes
+        .iter()
+        .filter(|node| {
+            node.kind == decl_kind
+                && node.name == decl_name
+                && file_matches(&node.file, file_path)
+                && line_matches(node.span.start[0], decl_line)
+        })
+        .min_by_key(|node| node.span.start[0].abs_diff(decl_line))
+        .map(|node| node.id.clone())
 }
 
 fn collect_swiftui_body_nodes<'a>(
@@ -1967,15 +2146,26 @@ pub fn enrich_swiftui_structure(
         .parse(source, None)
         .ok_or_else(|| anyhow::anyhow!("tree-sitter failed to parse Swift source"))?;
 
+    let mut declaration_nodes = Vec::new();
+    collect_swiftui_declaration_nodes(tree.root_node(), source, &mut declaration_nodes);
+
+    let file_str = file_path.to_string_lossy().to_string();
+    for decl_node in declaration_nodes {
+        let Some(decl_id) = matching_swiftui_declaration_id(result, file_path, decl_node, source)
+        else {
+            continue;
+        };
+        extract_swiftui_declaration_structure(decl_node, source, &file_str, &[], &decl_id, result);
+    }
+
     let mut body_nodes = Vec::new();
     collect_swiftui_body_nodes(tree.root_node(), source, &mut body_nodes);
 
-    let file_str = file_path.to_string_lossy().to_string();
     for body_node in body_nodes {
         let Some(body_id) = matching_body_id(result, file_path, body_node) else {
             continue;
         };
-        extract_swiftui_body_structure(body_node, source, &file_str, &[], &body_id, result);
+        extract_swiftui_declaration_structure(body_node, source, &file_str, &[], &body_id, result);
     }
 
     Ok(())
@@ -2412,11 +2602,15 @@ mod tests {
             .iter()
             .find(|n| n.kind == NodeKind::Branch && n.name == "if showDetails")
             .expect("if branch should exist");
-        let inline_panel = result
+        let body_inline_panel = result
             .nodes
             .iter()
-            .find(|n| n.kind == NodeKind::View && n.name == "InlinePanel")
-            .expect("InlinePanel view should exist");
+            .find(|n| {
+                n.kind == NodeKind::View
+                    && n.name == "InlinePanel"
+                    && n.id.starts_with("test.swift::ContentView::body::view:")
+            })
+            .expect("body InlinePanel view should exist");
         let chat_panel = result
             .nodes
             .iter()
@@ -2437,6 +2631,36 @@ mod tests {
             .iter()
             .find(|n| n.kind == NodeKind::View && n.name == "OverlayPanel")
             .expect("OverlayPanel should exist");
+        let helper_property = result
+            .nodes
+            .iter()
+            .find(|n| n.id == "test.swift::ContentView::chatRoomFragViewPanel")
+            .expect("helper property should exist");
+        let exit_property = result
+            .nodes
+            .iter()
+            .find(|n| n.id == "test.swift::ContentView::exitPopView")
+            .expect("exit property should exist");
+        let helper_text = result
+            .nodes
+            .iter()
+            .find(|n| {
+                n.kind == NodeKind::View
+                    && n.name == "Text"
+                    && n.id
+                        .starts_with("test.swift::ContentView::exitPopView::view:")
+            })
+            .expect("exit helper text should exist");
+        let helper_inline_panel = result
+            .nodes
+            .iter()
+            .find(|n| {
+                n.kind == NodeKind::View
+                    && n.name == "InlinePanel"
+                    && n.id
+                        .starts_with("test.swift::ContentView::chatRoomFragViewPanel::view:")
+            })
+            .expect("helper InlinePanel view should exist");
 
         assert!(has_edge(&result, &body.id, &nav.id, EdgeKind::Contains));
         assert!(has_edge(
@@ -2448,7 +2672,7 @@ mod tests {
         assert!(has_edge(
             &result,
             &if_branch.id,
-            &inline_panel.id,
+            &body_inline_panel.id,
             EdgeKind::Contains
         ));
         assert!(has_edge(
@@ -2470,6 +2694,18 @@ mod tests {
             &overlay_panel.id,
             EdgeKind::Contains
         ));
+        assert!(has_edge(
+            &result,
+            &helper_property.id,
+            &helper_inline_panel.id,
+            EdgeKind::Contains
+        ));
+        assert!(has_edge(
+            &result,
+            &exit_property.id,
+            &helper_text.id,
+            EdgeKind::Contains
+        ));
         assert!(
             result
                 .nodes
@@ -2477,6 +2713,65 @@ mod tests {
                 .all(|n| !(n.kind == NodeKind::Branch && n.name == "switch mode")),
             "non-view modifier closures should not become structural branches"
         );
+    }
+
+    #[test]
+    fn extracts_swiftui_structure_for_same_type_view_methods() {
+        let result = extract(
+            r#"
+            import SwiftUI
+
+            struct ContentView: View {
+                func helperPanel() -> some View {
+                    Text("Helper")
+                }
+
+                var body: some View {
+                    VStack {
+                        helperPanel()
+                    }
+                }
+            }
+            "#,
+        );
+
+        let helper_fn = result
+            .nodes
+            .iter()
+            .find(|n| n.id == "test.swift::ContentView::helperPanel")
+            .expect("helper method should exist");
+        let helper_call = result
+            .nodes
+            .iter()
+            .find(|n| {
+                n.kind == NodeKind::View
+                    && n.name == "helperPanel"
+                    && n.id.starts_with("test.swift::ContentView::body::view:")
+            })
+            .expect("helper method call should exist");
+        let helper_text = result
+            .nodes
+            .iter()
+            .find(|n| {
+                n.kind == NodeKind::View
+                    && n.name == "Text"
+                    && n.id
+                        .starts_with("test.swift::ContentView::helperPanel::view:")
+            })
+            .expect("helper method text should exist");
+
+        assert!(has_edge(
+            &result,
+            &helper_call.id,
+            &helper_fn.id,
+            EdgeKind::TypeRef
+        ));
+        assert!(has_edge(
+            &result,
+            &helper_fn.id,
+            &helper_text.id,
+            EdgeKind::Contains
+        ));
     }
 
     #[test]

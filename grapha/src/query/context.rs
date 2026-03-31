@@ -56,6 +56,7 @@ fn sort_ids_by_span<'a>(
 fn build_contains_tree<'a>(
     node_id: &'a str,
     contains_adj: &HashMap<&'a str, Vec<&'a str>>,
+    type_ref_adj: &HashMap<&'a str, Vec<&'a str>>,
     node_index: &HashMap<&'a str, &'a grapha_core::graph::Node>,
     ancestors: &mut Vec<&'a str>,
 ) -> Option<SymbolTreeRef> {
@@ -69,10 +70,34 @@ fn build_contains_tree<'a>(
     let mut child_ids = contains_adj.get(node_id).cloned().unwrap_or_default();
     sort_ids_by_span(&mut child_ids, node_index);
 
-    let contains = child_ids
+    let mut contains: Vec<_> = child_ids
         .into_iter()
-        .filter_map(|child_id| build_contains_tree(child_id, contains_adj, node_index, ancestors))
+        .filter_map(|child_id| {
+            build_contains_tree(child_id, contains_adj, type_ref_adj, node_index, ancestors)
+        })
         .collect();
+
+    if node.kind == grapha_core::graph::NodeKind::View {
+        let mut type_ref_ids = type_ref_adj.get(node_id).cloned().unwrap_or_default();
+        sort_ids_by_span(&mut type_ref_ids, node_index);
+        for type_ref_id in type_ref_ids {
+            let Some(target) = node_index.get(type_ref_id).copied() else {
+                continue;
+            };
+            if !matches!(
+                target.kind,
+                grapha_core::graph::NodeKind::Property | grapha_core::graph::NodeKind::Function
+            ) {
+                continue;
+            }
+
+            let mut inline_child_ids = contains_adj.get(type_ref_id).cloned().unwrap_or_default();
+            sort_ids_by_span(&mut inline_child_ids, node_index);
+            contains.extend(inline_child_ids.into_iter().filter_map(|child_id| {
+                build_contains_tree(child_id, contains_adj, type_ref_adj, node_index, ancestors)
+            }));
+        }
+    }
 
     ancestors.pop();
     Some(to_symbol_tree_ref(node, contains))
@@ -84,6 +109,7 @@ pub fn query_context(graph: &Graph, query: &str) -> Result<ContextResult, QueryR
     let node_index: HashMap<&str, &grapha_core::graph::Node> =
         graph.nodes.iter().map(|n| (n.id.as_str(), n)).collect();
     let mut contains_adj: HashMap<&str, Vec<&str>> = HashMap::new();
+    let mut type_ref_adj: HashMap<&str, Vec<&str>> = HashMap::new();
 
     let mut callers = Vec::new();
     let mut callees = Vec::new();
@@ -123,6 +149,11 @@ pub fn query_context(graph: &Graph, query: &str) -> Result<ContextResult, QueryR
                 .entry(edge.source.as_str())
                 .or_default()
                 .push(edge.target.as_str());
+        } else if edge.kind == EdgeKind::TypeRef {
+            type_ref_adj
+                .entry(edge.source.as_str())
+                .or_default()
+                .push(edge.target.as_str());
         }
     }
 
@@ -136,7 +167,15 @@ pub fn query_context(graph: &Graph, query: &str) -> Result<ContextResult, QueryR
 
     let contains_tree = contains_ids
         .iter()
-        .filter_map(|node_id| build_contains_tree(node_id, &contains_adj, &node_index, &mut vec![]))
+        .filter_map(|node_id| {
+            build_contains_tree(
+                node_id,
+                &contains_adj,
+                &type_ref_adj,
+                &node_index,
+                &mut vec![],
+            )
+        })
         .collect();
     let contains = contains_ids
         .into_iter()
@@ -388,6 +427,307 @@ mod tests {
         );
         assert_eq!(ctx.contained_by.len(), 1);
         assert_eq!(ctx.contained_by[0].name, "ContentView");
+    }
+
+    #[test]
+    fn context_inlines_property_and_function_view_helpers_but_not_subview_types() {
+        let graph = Graph {
+            version: "0.1.0".to_string(),
+            nodes: vec![
+                Node {
+                    id: "view.swift::ContentView".into(),
+                    kind: NodeKind::Struct,
+                    name: "ContentView".into(),
+                    file: "view.swift".into(),
+                    span: Span {
+                        start: [0, 0],
+                        end: [30, 0],
+                    },
+                    visibility: Visibility::Public,
+                    metadata: StdHashMap::new(),
+                    role: None,
+                    signature: None,
+                    doc_comment: None,
+                    module: None,
+                },
+                Node {
+                    id: "view.swift::ContentView::body".into(),
+                    kind: NodeKind::Property,
+                    name: "body".into(),
+                    file: "view.swift".into(),
+                    span: Span {
+                        start: [2, 4],
+                        end: [16, 4],
+                    },
+                    visibility: Visibility::Public,
+                    metadata: StdHashMap::new(),
+                    role: Some(NodeRole::EntryPoint),
+                    signature: None,
+                    doc_comment: None,
+                    module: None,
+                },
+                Node {
+                    id: "view.swift::ContentView::body::view:VStack@3:8".into(),
+                    kind: NodeKind::View,
+                    name: "VStack".into(),
+                    file: "view.swift".into(),
+                    span: Span {
+                        start: [3, 8],
+                        end: [12, 9],
+                    },
+                    visibility: Visibility::Private,
+                    metadata: StdHashMap::new(),
+                    role: None,
+                    signature: None,
+                    doc_comment: None,
+                    module: None,
+                },
+                Node {
+                    id: "view.swift::ContentView::body::view:panel@4:12".into(),
+                    kind: NodeKind::View,
+                    name: "panel".into(),
+                    file: "view.swift".into(),
+                    span: Span {
+                        start: [4, 12],
+                        end: [4, 17],
+                    },
+                    visibility: Visibility::Private,
+                    metadata: StdHashMap::new(),
+                    role: None,
+                    signature: None,
+                    doc_comment: None,
+                    module: None,
+                },
+                Node {
+                    id: "view.swift::ContentView::panel".into(),
+                    kind: NodeKind::Property,
+                    name: "panel".into(),
+                    file: "view.swift".into(),
+                    span: Span {
+                        start: [18, 4],
+                        end: [20, 4],
+                    },
+                    visibility: Visibility::Private,
+                    metadata: StdHashMap::new(),
+                    role: None,
+                    signature: None,
+                    doc_comment: None,
+                    module: None,
+                },
+                Node {
+                    id: "view.swift::ContentView::panel::view:Text@19:8".into(),
+                    kind: NodeKind::View,
+                    name: "Text".into(),
+                    file: "view.swift".into(),
+                    span: Span {
+                        start: [19, 8],
+                        end: [19, 20],
+                    },
+                    visibility: Visibility::Private,
+                    metadata: StdHashMap::new(),
+                    role: None,
+                    signature: None,
+                    doc_comment: None,
+                    module: None,
+                },
+                Node {
+                    id: "view.swift::ContentView::helper@5:12".into(),
+                    kind: NodeKind::View,
+                    name: "helper".into(),
+                    file: "view.swift".into(),
+                    span: Span {
+                        start: [5, 12],
+                        end: [5, 18],
+                    },
+                    visibility: Visibility::Private,
+                    metadata: StdHashMap::new(),
+                    role: None,
+                    signature: None,
+                    doc_comment: None,
+                    module: None,
+                },
+                Node {
+                    id: "view.swift::ContentView::helper".into(),
+                    kind: NodeKind::Function,
+                    name: "helper".into(),
+                    file: "view.swift".into(),
+                    span: Span {
+                        start: [22, 4],
+                        end: [24, 4],
+                    },
+                    visibility: Visibility::Private,
+                    metadata: StdHashMap::new(),
+                    role: None,
+                    signature: None,
+                    doc_comment: None,
+                    module: None,
+                },
+                Node {
+                    id: "view.swift::ContentView::helper::view:Image@23:8".into(),
+                    kind: NodeKind::View,
+                    name: "Image".into(),
+                    file: "view.swift".into(),
+                    span: Span {
+                        start: [23, 8],
+                        end: [23, 24],
+                    },
+                    visibility: Visibility::Private,
+                    metadata: StdHashMap::new(),
+                    role: None,
+                    signature: None,
+                    doc_comment: None,
+                    module: None,
+                },
+                Node {
+                    id: "view.swift::ContentView::body::view:Row@6:12".into(),
+                    kind: NodeKind::View,
+                    name: "Row".into(),
+                    file: "view.swift".into(),
+                    span: Span {
+                        start: [6, 12],
+                        end: [6, 26],
+                    },
+                    visibility: Visibility::Private,
+                    metadata: StdHashMap::new(),
+                    role: None,
+                    signature: None,
+                    doc_comment: None,
+                    module: None,
+                },
+                Node {
+                    id: "view.swift::Row".into(),
+                    kind: NodeKind::Struct,
+                    name: "Row".into(),
+                    file: "view.swift".into(),
+                    span: Span {
+                        start: [26, 0],
+                        end: [29, 0],
+                    },
+                    visibility: Visibility::Public,
+                    metadata: StdHashMap::new(),
+                    role: None,
+                    signature: None,
+                    doc_comment: None,
+                    module: None,
+                },
+            ],
+            edges: vec![
+                Edge {
+                    source: "view.swift::ContentView".into(),
+                    target: "view.swift::ContentView::body".into(),
+                    kind: EdgeKind::Contains,
+                    confidence: 1.0,
+                    direction: None,
+                    operation: None,
+                    condition: None,
+                    async_boundary: None,
+                },
+                Edge {
+                    source: "view.swift::ContentView::body".into(),
+                    target: "view.swift::ContentView::body::view:VStack@3:8".into(),
+                    kind: EdgeKind::Contains,
+                    confidence: 1.0,
+                    direction: None,
+                    operation: None,
+                    condition: None,
+                    async_boundary: None,
+                },
+                Edge {
+                    source: "view.swift::ContentView::body::view:VStack@3:8".into(),
+                    target: "view.swift::ContentView::body::view:panel@4:12".into(),
+                    kind: EdgeKind::Contains,
+                    confidence: 1.0,
+                    direction: None,
+                    operation: None,
+                    condition: None,
+                    async_boundary: None,
+                },
+                Edge {
+                    source: "view.swift::ContentView::body::view:VStack@3:8".into(),
+                    target: "view.swift::ContentView::helper@5:12".into(),
+                    kind: EdgeKind::Contains,
+                    confidence: 1.0,
+                    direction: None,
+                    operation: None,
+                    condition: None,
+                    async_boundary: None,
+                },
+                Edge {
+                    source: "view.swift::ContentView::body::view:VStack@3:8".into(),
+                    target: "view.swift::ContentView::body::view:Row@6:12".into(),
+                    kind: EdgeKind::Contains,
+                    confidence: 1.0,
+                    direction: None,
+                    operation: None,
+                    condition: None,
+                    async_boundary: None,
+                },
+                Edge {
+                    source: "view.swift::ContentView::panel".into(),
+                    target: "view.swift::ContentView::panel::view:Text@19:8".into(),
+                    kind: EdgeKind::Contains,
+                    confidence: 1.0,
+                    direction: None,
+                    operation: None,
+                    condition: None,
+                    async_boundary: None,
+                },
+                Edge {
+                    source: "view.swift::ContentView::helper".into(),
+                    target: "view.swift::ContentView::helper::view:Image@23:8".into(),
+                    kind: EdgeKind::Contains,
+                    confidence: 1.0,
+                    direction: None,
+                    operation: None,
+                    condition: None,
+                    async_boundary: None,
+                },
+                Edge {
+                    source: "view.swift::ContentView::body::view:panel@4:12".into(),
+                    target: "view.swift::ContentView::panel".into(),
+                    kind: EdgeKind::TypeRef,
+                    confidence: 0.9,
+                    direction: None,
+                    operation: None,
+                    condition: None,
+                    async_boundary: None,
+                },
+                Edge {
+                    source: "view.swift::ContentView::helper@5:12".into(),
+                    target: "view.swift::ContentView::helper".into(),
+                    kind: EdgeKind::TypeRef,
+                    confidence: 0.9,
+                    direction: None,
+                    operation: None,
+                    condition: None,
+                    async_boundary: None,
+                },
+                Edge {
+                    source: "view.swift::ContentView::body::view:Row@6:12".into(),
+                    target: "view.swift::Row".into(),
+                    kind: EdgeKind::TypeRef,
+                    confidence: 0.9,
+                    direction: None,
+                    operation: None,
+                    condition: None,
+                    async_boundary: None,
+                },
+            ],
+        };
+
+        let ctx = query_context(&graph, "body").unwrap();
+        let vstack = &ctx.contains_tree[0];
+        assert_eq!(vstack.name, "VStack");
+        assert_eq!(vstack.contains.len(), 3);
+        assert_eq!(vstack.contains[0].name, "panel");
+        assert_eq!(vstack.contains[0].contains[0].name, "Text");
+        assert_eq!(vstack.contains[1].name, "helper");
+        assert_eq!(vstack.contains[1].contains[0].name, "Image");
+        assert_eq!(vstack.contains[2].name, "Row");
+        assert!(
+            vstack.contains[2].contains.is_empty(),
+            "custom subview types should stay as component boundaries"
+        );
     }
 
     #[test]
