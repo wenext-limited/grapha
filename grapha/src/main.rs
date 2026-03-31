@@ -443,24 +443,40 @@ fn main() -> anyhow::Result<()> {
             std::fs::create_dir_all(&store_path)
                 .with_context(|| format!("failed to create store dir {}", store_path.display()))?;
 
-            let t = Instant::now();
-            let s: Box<dyn store::Store> = match format.as_str() {
-                "json" => Box::new(store::json::JsonStore::new(store_path.join("graph.json"))),
-                "sqlite" => Box::new(store::sqlite::SqliteStore::new(
-                    store_path.join("grapha.db"),
-                )),
-                other => anyhow::bail!("unknown store format: {other}"),
-            };
-            s.save(&graph)?;
+            // Run SQLite save and search index build in parallel — they're independent
+            let search_index_path = store_path.join("search_index");
+            let save_result = std::thread::scope(|scope| {
+                let save_handle = scope.spawn(|| {
+                    let t = Instant::now();
+                    let s: Box<dyn store::Store + Send> = match format.as_str() {
+                        "json" => {
+                            Box::new(store::json::JsonStore::new(store_path.join("graph.json")))
+                        }
+                        "sqlite" => Box::new(store::sqlite::SqliteStore::new(
+                            store_path.join("grapha.db"),
+                        )),
+                        other => anyhow::bail!("unknown store format: {other}"),
+                    };
+                    s.save(&graph)?;
+                    Ok::<_, anyhow::Error>(t)
+                });
+
+                let search_handle = scope.spawn(|| {
+                    let t = Instant::now();
+                    search::build_index(&graph, &search_index_path)?;
+                    Ok::<_, anyhow::Error>(t)
+                });
+
+                let save_t = save_handle.join().expect("save thread panicked")?;
+                let search_t = search_handle.join().expect("search thread panicked")?;
+                Ok::<_, anyhow::Error>((save_t, search_t))
+            });
+            let (save_t, search_t) = save_result?;
             progress::done(
                 &format!("saved to {} ({})", store_path.display(), format),
-                t,
+                save_t,
             );
-
-            let t = Instant::now();
-            let search_index_path = store_path.join("search_index");
-            search::build_index(&graph, &search_index_path)?;
-            progress::done("built search index", t);
+            progress::done("built search index", search_t);
 
             progress::summary(&format!(
                 "\n  {} nodes, {} edges indexed in {:.1}s",

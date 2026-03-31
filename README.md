@@ -4,9 +4,35 @@
 
 Blazingly fast code intelligence for LLM agents and developer tooling.
 
-Grapha transforms source code into a normalized, graph-based representation with compiler-grade accuracy. It combines [tree-sitter](https://tree-sitter.github.io/) parsing with Xcode's index store for fully type-resolved symbol graphs, then provides persistence, search, dataflow tracing, and impact analysis — giving agents and developers structured access to codebases at scale.
+Grapha transforms source code into a normalized, graph-based representation with compiler-grade accuracy. For Swift, it reads Xcode's pre-built index store via a binary FFI bridge for fully type-resolved symbol graphs, falling back to tree-sitter for instant parsing without a build. The resulting graph provides persistence, search, dataflow tracing, and impact analysis — giving agents and developers structured access to codebases at scale.
 
-> **1,991 Swift files — 111K nodes, 627K compiler-resolved edges — indexed in 21 seconds.**
+> **1,991 Swift files — 123K nodes, 766K edges — indexed in 6 seconds.**
+
+## Performance
+
+Tested on a production iOS app (1,991 Swift files, ~300K lines):
+
+| Phase | Time |
+|-------|------|
+| Extraction (index store + binary FFI) | **1.8s** |
+| Merge (module-aware cross-file resolution) | 0.15s |
+| Classification (entry points + terminals) | 0.97s |
+| SQLite persistence (889K rows) | 2.1s |
+| Search index (BM25 via tantivy) | 0.8s |
+| **Total** | **6.0s** |
+
+| Metric | Value |
+|--------|-------|
+| Nodes | 123,323 |
+| Edges (compiler-resolved) | 766,427 |
+| Entry points (auto-detected) | 2,985 |
+| Terminal operations | 10,548 |
+
+**Why it's fast:**
+- **Zero-parse binary FFI** — Swift bridge returns packed structs + deduplicated string table instead of JSON. Rust reads with pointer arithmetic, no serde.
+- **Index store reuse** — reads Xcode's already-compiled symbol database. No re-parsing, no re-resolving.
+- **Deferred indexing** — SQLite indexes built after bulk insert, not during.
+- **Parallel extraction** — rayon-powered concurrent file processing.
 
 ## Features
 
@@ -14,7 +40,7 @@ Grapha transforms source code into a normalized, graph-based representation with
 - **Dataflow tracing** — trace forward from entry points to terminal operations (network, persistence, cache). Trace backward from any symbol to affected entry points.
 - **Impact analysis** — BFS blast radius: "if I change this function, what breaks?"
 - **Entry point detection** — auto-detects SwiftUI Views, `@Observable` classes, `fn main()`, `#[test]` functions.
-- **Terminal classification** — recognizes network calls (FrameNetwork), persistence (FrameStorage, GRDB), cache (Kingfisher), analytics (FrameStat), and more. Extensible via `grapha.toml`.
+- **Terminal classification** — recognizes network calls, persistence (GRDB, CoreData), cache (Kingfisher), analytics, and more. Extensible via `grapha.toml`.
 - **Cross-module resolution** — import-guided disambiguation with confidence scoring. Module-aware merging for multi-package projects.
 - **Web UI** — embedded interactive graph explorer (`grapha serve`).
 - **Multi-language** — Rust and Swift today. Architecture supports adding Java, Kotlin, C#, TypeScript.
@@ -152,7 +178,7 @@ grapha/          CLI binary, Rust extractor, pipeline, query engines, web UI
 ### Extraction Waterfall (Swift)
 
 ```
-1. Xcode Index Store (libIndexStore.dylib via Swift bridge FFI)
+1. Xcode Index Store (binary FFI via Swift bridge)
    → compiler-resolved USRs, confidence 1.0
    → auto-discovered from DerivedData
 
@@ -163,7 +189,7 @@ grapha/          CLI binary, Rust extractor, pipeline, query engines, web UI
    → fast fallback, limited accuracy, confidence 0.6-0.8
 ```
 
-The Swift bridge (`libGraphaSwiftBridge.dylib`) is automatically compiled by `build.rs` when a Swift toolchain is detected. No Swift required for Rust-only projects.
+The Swift bridge (`libGraphaSwiftBridge.dylib`) is automatically compiled by `build.rs` when a Swift toolchain is detected. Data crosses the FFI boundary as a flat binary buffer (packed structs + string table) — no JSON serialization overhead. No Swift required for Rust-only projects.
 
 ### Pipeline
 
@@ -232,24 +258,11 @@ pattern = ".*Coordinator.start"
 
 The per-language crate architecture (`grapha-swift/`, future `grapha-java/`, etc.) supports adding new languages with the same pattern: compiler index → syntax parser → tree-sitter fallback.
 
-## Performance
-
-Tested on a production iOS project (1,991 Swift files):
-
-| Metric | Value |
-|--------|-------|
-| Index time | **21 seconds** |
-| Nodes | 111,096 |
-| Edges | 627,558 |
-| Entry points | 2,993 |
-| Terminals | 2,959 |
-| Peak memory | ~200 MB |
-
 ## Development
 
 ```bash
 cargo build                    # Build all workspace crates
-cargo test                     # Run all tests (173 tests)
+cargo test                     # Run all tests (213 tests)
 cargo build -p grapha-core     # Build shared types only
 cargo build -p grapha-swift    # Build Swift extractor
 cargo run -p grapha -- <cmd>   # Run the CLI

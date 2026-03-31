@@ -1,177 +1,273 @@
 # Grapha
 
-极速代码智能，为 LLM 智能体而生。
+[English](../README.md)
 
-Grapha 将源代码转换为标准化的图结构表示，专为 LLM 消费优化。通过 [tree-sitter](https://tree-sitter.github.io/) 解析语法，提取符号和关系，并提供持久化、搜索和影响分析——让智能体能够结构化地访问大规模代码库。
+极速代码智能，为 LLM 智能体和开发者工具而生。
 
-> **1,991 个 Swift 文件，30.6 万行代码 — 2.5 秒完成索引，峰值内存 146 MB。**
+Grapha 将源代码转换为标准化、图结构的表示，具备编译器级别的精度。对于 Swift，它通过二进制 FFI 桥接读取 Xcode 预编译的 Index Store，获取完整类型解析的符号图；在无编译产物时自动回退到 tree-sitter 实现即时解析。生成的图支持持久化、搜索、数据流追踪和影响分析 —— 让智能体和开发者能够结构化地访问大规模代码库。
+
+> **1,991 个 Swift 文件 — 12.3 万节点，76.6 万编译器解析的边 — 6 秒完成索引。**
+
+## 性能
+
+在生产级 iOS 应用上实测（1,991 个 Swift 文件，约 30 万行代码）：
+
+| 阶段 | 耗时 |
+|------|------|
+| 提取（Index Store + 二进制 FFI） | **1.8 秒** |
+| 合并（模块感知的跨文件解析） | 0.15 秒 |
+| 分类（入口点 + 终端操作） | 0.97 秒 |
+| SQLite 持久化（88.9 万行） | 2.1 秒 |
+| 搜索索引（BM25 via tantivy） | 0.8 秒 |
+| **合计** | **6.0 秒** |
+
+| 指标 | 数值 |
+|------|------|
+| 节点数 | 123,323 |
+| 边数（编译器解析） | 766,427 |
+| 入口点（自动检测） | 2,985 |
+| 终端操作 | 10,548 |
+
+**为什么这么快：**
+- **零解析二进制 FFI** — Swift 桥接返回紧凑结构体 + 去重字符串表，而非 JSON。Rust 端通过指针运算直接读取，无需 serde 反序列化。
+- **复用 Index Store** — 直接读取 Xcode 已编译的符号数据库，无需重新解析、无需重新做类型解析。
+- **延迟索引构建** — SQLite 索引在批量插入完成后创建，而非逐行维护。
+- **并行提取** — 基于 rayon 的并发文件处理。
+
+## 功能特性
+
+- **编译器级精度** — 读取 Xcode 预编译的 Index Store，获取 100% 类型解析的调用图（Swift）。无编译产物时自动回退到 tree-sitter 实现即时解析。
+- **数据流追踪** — 从入口点正向追踪到终端操作（网络、持久化、缓存），或从任意符号反向追踪到受影响的入口点。
+- **影响分析** — BFS 爆炸半径："如果我改了这个函数，什么会受影响？"
+- **入口点检测** — 自动识别 SwiftUI View、`@Observable` 类、`fn main()`、`#[test]` 函数。
+- **终端分类** — 识别网络调用、持久化（GRDB、CoreData）、缓存（Kingfisher）、统计分析等。支持通过 `grapha.toml` 扩展自定义规则。
+- **跨模块解析** — 基于 import 的消歧义，带置信度评分。支持多 Package 项目的模块感知合并。
+- **Web UI** — 内嵌交互式图可视化（`grapha serve`）。
+- **多语言** — 目前支持 Rust 和 Swift。架构可扩展至 Java、Kotlin、C#、TypeScript。
 
 ## 安装
 
 ```bash
-cargo install --path .
+cargo install --path grapha
 ```
 
 ## 快速开始
 
 ```bash
-# 索引项目（持久化到 .grapha/）
+# 索引项目
 grapha index .
 
 # 搜索符号
-grapha search Config
+grapha search sendMessage
 
 # 获取符号的 360° 上下文
-grapha context Config
+grapha context sendMessage
 
 # 图查询的人类可读树形输出
-grapha reverse Config --format tree
+grapha reverse handleSendResult --format tree
 
-# 分析变更的影响范围
-grapha impact Config --depth 3
+# 影响分析：改了这个函数，什么会受影响？
+grapha impact bootstrapGame --depth 5
 
-# 检测 git 变更及受影响的符号
-grapha changes
+# 正向追踪：入口点 → 终端操作
+grapha trace bootstrapGame
+
+# 反向追踪：哪些入口点会经过这个符号？
+grapha reverse handleSendResult
+
+# 列出自动检测到的入口点
+grapha entries
+
+# 交互式 Web UI
+grapha serve --port 8765
 ```
 
 ## 命令
 
-### `grapha analyze` — 提取并输出图
+### `grapha index` — 构建图
 
 ```bash
-grapha analyze src/              # 分析目录（遵守 .gitignore）
-grapha analyze src/main.rs       # 分析单个文件
-grapha analyze src/ -o graph.json   # 输出到文件
-grapha analyze src/ --filter fn,struct,trait  # 按符号类型过滤
-grapha analyze src/ --compact    # LLM 优化的分组输出
+grapha index .                         # 索引项目（SQLite）
+grapha index . --format json           # JSON 输出（调试用）
+grapha index . --store-dir /tmp/idx    # 自定义存储位置
 ```
 
-### `grapha index` — 持久化图到存储
+自动从 DerivedData 发现 Xcode 的 Index Store，获取编译器解析的符号。无 Index Store 时自动回退到 tree-sitter。
+
+### `grapha analyze` — 一次性提取
 
 ```bash
-grapha index .                         # 索引项目（SQLite，默认）
-grapha index . --format json           # 以 JSON 格式索引（用于调试）
-grapha index . --store-dir /tmp/idx    # 自定义存储位置
+grapha analyze src/                    # 分析目录
+grapha analyze src/main.rs             # 分析单文件
+grapha analyze src/ --compact          # LLM 优化的分组输出
+grapha analyze src/ --filter fn,struct # 按符号类型过滤
+grapha analyze src/ -o graph.json      # 输出到文件
 ```
 
 ### `grapha context` — 360° 符号视图
 
 ```bash
-grapha context Config           # 调用者、被调用者、实现者
-grapha context Config -p /path/to/project
-grapha context Config --format tree
+grapha context Config                  # 调用者、被调用者、实现者
+grapha context bootstrapGame           # 模糊名称匹配
+grapha context bootstrapGame --format tree
 ```
 
 ### `grapha impact` — 影响范围分析
 
 ```bash
-grapha impact Config            # 如果 Config 变更，谁会受影响？
-grapha impact Config --depth 5  # 更深层遍历
-grapha impact Config --format tree
+grapha impact bootstrapGame            # 谁依赖这个符号？
+grapha impact bootstrapGame --depth 5  # 更深层遍历
+grapha impact bootstrapGame --format tree
 ```
 
-### `grapha search` — BM25 全文搜索
+### `grapha trace` — 正向数据流追踪
 
 ```bash
-grapha search "Config"          # 按名称搜索
-grapha search "main.rs" --limit 5
+grapha trace bootstrapGame             # 入口点 → 服务层 → 终端操作
+grapha trace sendMessage --depth 10
+grapha trace bootstrapGame --format tree
 ```
 
-### `grapha changes` — 基于 Git 的变更检测
+### `grapha reverse` — 入口点影响
 
 ```bash
-grapha changes              # 所有未提交的变更
-grapha changes staged       # 仅暂存区变更
-grapha changes main         # 与某个分支对比
+grapha reverse handleSendResult        # 哪些 View / 入口点会经过这里？
+grapha reverse handleSendResult --format tree
 ```
 
-## 输出格式
+### `grapha entries` — 列出入口点
 
-### 标准格式（JSON 图）
-
-```json
-{
-  "version": "0.1.0",
-  "nodes": [
-    {
-      "id": "graph.rs::Config",
-      "kind": "struct",
-      "name": "Config",
-      "file": "graph.rs",
-      "span": { "start": [10, 0], "end": [15, 1] },
-      "visibility": "public",
-      "metadata": {}
-    }
-  ],
-  "edges": [
-    {
-      "source": "main.rs::run",
-      "target": "graph.rs::Config",
-      "kind": "type_ref",
-      "confidence": 0.85
-    }
-  ]
-}
+```bash
+grapha entries                         # 所有检测到的入口点
+grapha entries --format tree
 ```
 
-### 紧凑格式（`--compact`）— LLM 优化
+### `grapha search` — 全文搜索
 
-```json
-{
-  "version": "0.1.0",
-  "files": {
-    "graph.rs": {
-      "symbols": [
-        {
-          "name": "Config",
-          "kind": "struct",
-          "span": [10, 15],
-          "type_refs": ["Node"]
-        }
-      ]
-    }
-  }
-}
+```bash
+grapha search "ViewModel"
+grapha search "send" --limit 10
 ```
 
-### 节点类型
+### `grapha changes` — Git 变更检测
 
-`function`（函数）、`struct`（结构体）、`enum`（枚举）、`trait`（特征）、`impl`（实现块）、`module`（模块）、`field`（字段）、`variant`（枚举变体）、`property`（属性）、`constant`（常量）、`type_alias`（类型别名）、`protocol`（协议）、`extension`（扩展）
+```bash
+grapha changes                         # 所有未提交的变更
+grapha changes staged                  # 仅暂存区
+grapha changes main                    # 与某个分支对比
+```
 
-### 边类型
+### `grapha serve` — Web UI
 
-| 类型 | 含义 | 置信度 |
-|------|------|--------|
-| `calls` | 函数调用另一个函数 | 0.8 |
-| `uses` | `use`/`import` 导入语句 | 0.7 |
-| `implements` | `impl Trait for Type` / 协议遵循 | 0.9 |
-| `contains` | 结构嵌套（模块 > 结构体 > 字段） | 1.0 |
-| `type_ref` | 签名或字段中的类型引用 | 0.85 |
-| `inherits` | 超特征约束（`trait Child: Base`） | 0.9 |
+```bash
+grapha serve --port 8765               # 打开 http://localhost:8765
+```
+
+基于 vis-network 的交互式图可视化：点击节点、追踪流向、搜索符号、按类型/角色过滤。
+
+## 架构
+
+### 工作空间
+
+```
+grapha-core/     共享类型（Node、Edge、Graph、ExtractionResult）
+grapha-swift/    Swift 提取：Index Store → SwiftSyntax → tree-sitter 瀑布策略
+grapha/          CLI 二进制、Rust 提取器、流水线、查询引擎、Web UI
+```
+
+### 提取瀑布策略（Swift）
+
+```
+1. Xcode Index Store（通过 Swift 桥接的二进制 FFI）
+   → 编译器解析的 USR，置信度 1.0
+   → 从 DerivedData 自动发现
+
+2. SwiftSyntax（通过 Swift 桥接 FFI）
+   → 精确语法解析，无类型解析，置信度 0.9
+
+3. tree-sitter-swift（内嵌）
+   → 快速回退，精度有限，置信度 0.6-0.8
+```
+
+Swift 桥接库（`libGraphaSwiftBridge.dylib`）在检测到 Swift 工具链时由 `build.rs` 自动编译。数据通过扁平二进制缓冲区（紧凑结构体 + 字符串表）跨越 FFI 边界 — 零 JSON 序列化开销。纯 Rust 项目无需 Swift 环境。
+
+### 流水线
+
+```
+发现 → 提取 → 合并 → 分类 → 压缩 → 存储 → 查询/服务
+         ↑       ↑       ↑
+    Index Store  模块感知  入口点
+    或 tree-    解析     + 终端操作
+    sitter
+```
+
+### 图模型
+
+节点代表符号（函数、类型、属性），边代表关系并附带置信度评分。
+
+**节点类型：** `function`（函数）、`struct`（结构体）、`enum`（枚举）、`trait`（特征）、`protocol`（协议）、`extension`（扩展）、`property`（属性）、`field`（字段）、`variant`（枚举变体）、`constant`（常量）、`type_alias`（类型别名）、`impl`（实现块）、`module`（模块）
+
+**边类型：**
+
+| 类型 | 含义 |
+|------|------|
+| `calls` | 函数/方法调用 |
+| `implements` | 协议遵循 / trait 实现 |
+| `inherits` | 超类 / 超 trait |
+| `contains` | 结构嵌套 |
+| `type_ref` | 类型引用 |
+| `uses` | 导入语句 |
+| `reads` / `writes` | 数据访问方向 |
+| `publishes` / `subscribes` | 事件流 |
+
+**边上的数据流注解：**
+
+| 字段 | 用途 |
+|------|------|
+| `direction` | `read`、`write`、`read_write`、`pure` |
+| `operation` | `fetch`、`save`、`publish`、`navigate` 等 |
+| `condition` | 守卫/条件文本（条件调用时） |
+| `async_boundary` | 是否跨越 async 边界 |
+
+**节点角色：**
+- `entry_point` — SwiftUI View.body、@Observable 方法、fn main、#[test]
+- `terminal` — 网络、持久化、缓存、事件、钥匙串、搜索
+
+## 配置
+
+可选的 `grapha.toml`，用于自定义分类器和入口点：
+
+```toml
+[[classifiers]]
+pattern = "FirebaseFirestore.*setData"
+terminal = "persistence"
+direction = "write"
+operation = "set"
+
+[[entry_points]]
+language = "swift"
+pattern = ".*Coordinator.start"
+```
 
 ## 支持的语言
 
-- **Rust**（通过 `tree-sitter-rust`）
-- **Swift**（通过 `tree-sitter-swift`）
+| 语言 | 提取方式 | 类型解析 |
+|------|----------|----------|
+| **Swift** | tree-sitter + Xcode Index Store | 编译器级（USR） |
+| **Rust** | tree-sitter | 基于名称 |
 
-核心设计与语言无关。添加新语言只需实现 `LanguageExtractor` trait 并提供对应的 tree-sitter 语法。
-
-## 设计原则
-
-- **结构化，而非语义化** — tree-sitter 解析语法而非类型。函数调用解析基于名称匹配并附带置信度评分，不进行类型推断，也不支持跨 crate 解析。
-- **为 LLM 优化** — 最小化 token 数量，确定性 ID，扁平 JSON 结构。`--compact` 模式按文件分组，便于智能体遍历。
-- **优雅降级** — 部分解析时尽量提取可用内容。解析失败的文件会输出警告并跳过。跨文件引用通过名称匹配解析，并降低置信度。
-- **持久化 + 查询** — 索引一次，多次查询。生产环境使用 SQLite，调试时使用 JSON。
+按语言分 crate 的架构（`grapha-swift/`，未来 `grapha-java/` 等）支持以相同模式添加新语言：编译器索引 → 语法解析器 → tree-sitter 回退。
 
 ## 开发
 
 ```bash
-cargo build                    # 构建
-cargo test                     # 运行所有测试（79 个测试）
+cargo build                    # 构建所有工作空间 crate
+cargo test                     # 运行所有测试（213 个测试）
+cargo build -p grapha-core     # 仅构建共享类型
+cargo build -p grapha-swift    # 构建 Swift 提取器
+cargo run -p grapha -- <cmd>   # 运行 CLI
 cargo clippy                   # 代码检查
 cargo fmt                      # 代码格式化
-cargo run -- analyze src/      # 对自身源码运行
-cargo run -- index .           # 索引本项目
 ```
 
 ## 许可证
