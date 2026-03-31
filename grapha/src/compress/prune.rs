@@ -20,13 +20,26 @@ pub fn prune(graph: Graph, keep_private_leaves: bool) -> Graph {
     };
 
     let kept_ids: HashSet<&str> = kept_nodes.iter().map(|n| n.id.as_str()).collect();
+    let kept_kinds: std::collections::HashMap<&str, NodeKind> =
+        kept_nodes.iter().map(|n| (n.id.as_str(), n.kind)).collect();
 
     let edges: Vec<Edge> = graph
         .edges
         .into_iter()
         .filter(|e| {
             if e.kind == EdgeKind::Contains {
-                return false;
+                let source_kind = kept_kinds.get(e.source.as_str()).copied();
+                let target_kind = kept_kinds.get(e.target.as_str()).copied();
+                let keep_swiftui_contains = matches!(
+                    (source_kind, target_kind),
+                    (
+                        Some(NodeKind::View | NodeKind::Branch | NodeKind::Property),
+                        Some(NodeKind::View | NodeKind::Branch)
+                    )
+                );
+                if !keep_swiftui_contains {
+                    return false;
+                }
             }
             if e.kind == EdgeKind::Uses && !kept_ids.contains(e.target.as_str()) {
                 return false;
@@ -152,5 +165,48 @@ mod tests {
         };
         let pruned = prune(graph, true);
         assert_eq!(pruned.nodes.len(), 2);
+    }
+
+    #[test]
+    fn prune_keeps_swiftui_contains_edges() {
+        let graph = Graph {
+            version: "0.1.0".to_string(),
+            nodes: vec![
+                make_node("body", NodeKind::Property, Visibility::Public),
+                make_node("vstack", NodeKind::View, Visibility::Private),
+                make_node("text", NodeKind::View, Visibility::Private),
+            ],
+            edges: vec![
+                Edge {
+                    source: "body".into(),
+                    target: "vstack".into(),
+                    kind: EdgeKind::Contains,
+                    confidence: 1.0,
+                    direction: None,
+                    operation: None,
+                    condition: None,
+                    async_boundary: None,
+                },
+                Edge {
+                    source: "vstack".into(),
+                    target: "text".into(),
+                    kind: EdgeKind::Contains,
+                    confidence: 1.0,
+                    direction: None,
+                    operation: None,
+                    condition: None,
+                    async_boundary: None,
+                },
+            ],
+        };
+
+        let pruned = prune(graph, true);
+        assert_eq!(pruned.edges.len(), 2);
+        assert!(
+            pruned
+                .edges
+                .iter()
+                .all(|edge| edge.kind == EdgeKind::Contains)
+        );
     }
 }

@@ -48,6 +48,8 @@ pub fn group(graph: &Graph) -> GroupedGraph {
         edges_by_source.entry(&edge.source).or_default().push(edge);
     }
 
+    let id_to_node: BTreeMap<&str, &grapha_core::graph::Node> =
+        graph.nodes.iter().map(|n| (n.id.as_str(), n)).collect();
     let id_to_name: BTreeMap<&str, &str> = graph
         .nodes
         .iter()
@@ -56,7 +58,7 @@ pub fn group(graph: &Graph) -> GroupedGraph {
 
     for node in &graph.nodes {
         let edges = edges_by_source.get(node.id.as_str());
-        let mut members = Vec::new();
+        let mut member_entries: Vec<([usize; 2], [usize; 2], String, String)> = Vec::new();
         let mut calls = Vec::new();
         let mut implements = Vec::new();
         let mut inherits = Vec::new();
@@ -71,7 +73,27 @@ pub fn group(graph: &Graph) -> GroupedGraph {
                     .copied()
                     .unwrap_or_else(|| edge.target.rsplit("::").next().unwrap_or(&edge.target));
                 match edge.kind {
-                    EdgeKind::Contains => members.push(target_name.to_string()),
+                    EdgeKind::Contains => {
+                        let sort_key = id_to_node
+                            .get(edge.target.as_str())
+                            .map(|node| {
+                                (
+                                    node.span.start,
+                                    node.span.end,
+                                    node.name.clone(),
+                                    node.id.clone(),
+                                )
+                            })
+                            .unwrap_or_else(|| {
+                                (
+                                    [usize::MAX, usize::MAX],
+                                    [usize::MAX, usize::MAX],
+                                    target_name.to_string(),
+                                    edge.target.clone(),
+                                )
+                            });
+                        member_entries.push(sort_key);
+                    }
                     EdgeKind::Calls => calls.push(target_name.to_string()),
                     EdgeKind::Implements => implements.push(target_name.to_string()),
                     EdgeKind::Inherits => inherits.push(target_name.to_string()),
@@ -84,6 +106,17 @@ pub fn group(graph: &Graph) -> GroupedGraph {
                 }
             }
         }
+        member_entries.sort_by(|left, right| {
+            left.0
+                .cmp(&right.0)
+                .then_with(|| left.1.cmp(&right.1))
+                .then_with(|| left.2.cmp(&right.2))
+                .then_with(|| left.3.cmp(&right.3))
+        });
+        let members = member_entries
+            .into_iter()
+            .map(|(_, _, name, _)| name)
+            .collect();
 
         let file_key = node.file.to_string_lossy().to_string();
         files.entry(file_key).or_default().push(SymbolSummary {

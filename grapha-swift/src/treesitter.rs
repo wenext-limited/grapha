@@ -117,6 +117,13 @@ fn make_id(file: &str, module_path: &[String], name: &str) -> String {
     }
 }
 
+/// Build a declaration/member ID scoped to its owning declaration when present.
+fn make_decl_id(file: &str, module_path: &[String], parent_id: Option<&str>, name: &str) -> String {
+    parent_id
+        .map(|pid| format!("{pid}::{name}"))
+        .unwrap_or_else(|| make_id(file, module_path, name))
+}
+
 /// Extract the text of the first `simple_identifier` named child (used for function names).
 fn simple_identifier_text(node: tree_sitter::Node, source: &[u8]) -> Option<String> {
     let mut cursor = node.walk();
@@ -229,7 +236,7 @@ fn extract_struct_or_class(
     let Some(name) = type_identifier_text(node, source) else {
         return;
     };
-    let id = make_id(file, module_path, &name);
+    let id = make_decl_id(file, module_path, parent_id, &name);
     let visibility = extract_visibility(node, source);
 
     emit_contains_edge(parent_id, &id, result);
@@ -341,7 +348,7 @@ fn extract_property_as_entry_point(
 ) {
     let name = find_pattern_name(node, source);
     let Some(name) = name else { return };
-    let id = make_id(file, module_path, &name);
+    let id = make_decl_id(file, module_path, parent_id, &name);
     let visibility = extract_visibility(node, source);
 
     emit_contains_edge(parent_id, &id, result);
@@ -367,6 +374,7 @@ fn extract_property_as_entry_point(
     if let Ok(text) = node.utf8_text(source) {
         extract_calls_from_text(text, file, module_path, &id, result);
     }
+    extract_swiftui_body_structure(node, source, file, module_path, &id, result);
 }
 
 /// Extract a function with an optional entry point hint from parent (Observable).
@@ -390,7 +398,7 @@ fn extract_function_with_entry_hint(
         };
         n
     };
-    let id = make_id(file, module_path, &name);
+    let id = make_decl_id(file, module_path, parent_id, &name);
     let visibility = extract_visibility(node, source);
     let signature = extract_swift_signature(node, source);
     let doc_comment = extract_swift_doc_comment(node, source);
@@ -459,7 +467,7 @@ fn extract_enum(
     let Some(name) = type_identifier_text(node, source) else {
         return;
     };
-    let id = make_id(file, module_path, &name);
+    let id = make_decl_id(file, module_path, parent_id, &name);
     let visibility = extract_visibility(node, source);
 
     emit_contains_edge(parent_id, &id, result);
@@ -482,7 +490,7 @@ fn extract_enum(
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
         if child.kind() == "enum_class_body" {
-            extract_enum_entries(child, source, file, module_path, &id, &name, result);
+            extract_enum_entries(child, source, file, module_path, &id, result);
         }
     }
 }
@@ -494,7 +502,6 @@ fn extract_enum_entries(
     file: &str,
     module_path: &[String],
     parent_id: &str,
-    parent_name: &str,
     result: &mut ExtractionResult,
 ) {
     let mut cursor = body.walk();
@@ -502,8 +509,7 @@ fn extract_enum_entries(
         if child.kind() == "enum_entry"
             && let Some(case_name) = simple_identifier_text(child, source)
         {
-            let qualified = format!("{parent_name}.{case_name}");
-            let id = make_id(file, module_path, &qualified);
+            let id = make_decl_id(file, module_path, Some(parent_id), &case_name);
 
             result.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -545,7 +551,7 @@ fn extract_extension(
     // Extension uses user_type > type_identifier for the extended type name
     let name = find_user_type_name(node, source).unwrap_or_else(|| "Unknown".to_string());
     let ext_name = format!("ext_{}", name);
-    let id = make_id(file, module_path, &ext_name);
+    let id = make_decl_id(file, module_path, parent_id, &ext_name);
 
     emit_contains_edge(parent_id, &id, result);
 
@@ -595,7 +601,7 @@ fn extract_protocol(
     let Some(name) = type_identifier_text(node, source) else {
         return;
     };
-    let id = make_id(file, module_path, &name);
+    let id = make_decl_id(file, module_path, parent_id, &name);
     let visibility = extract_visibility(node, source);
 
     emit_contains_edge(parent_id, &id, result);
@@ -642,7 +648,7 @@ fn extract_function(
         };
         n
     };
-    let id = make_id(file, module_path, &name);
+    let id = make_decl_id(file, module_path, parent_id, &name);
     let visibility = extract_visibility(node, source);
     let signature = extract_swift_signature(node, source);
     let doc_comment = extract_swift_doc_comment(node, source);
@@ -704,7 +710,7 @@ fn extract_property(
     // Property name is in pattern > simple_identifier
     let name = find_pattern_name(node, source);
     let Some(name) = name else { return };
-    let id = make_id(file, module_path, &name);
+    let id = make_decl_id(file, module_path, parent_id, &name);
     let visibility = extract_visibility(node, source);
 
     emit_contains_edge(parent_id, &id, result);
@@ -831,7 +837,7 @@ fn extract_typealias(
     let Some(name) = type_identifier_text(node, source) else {
         return;
     };
-    let id = make_id(file, module_path, &name);
+    let id = make_decl_id(file, module_path, parent_id, &name);
     let visibility = extract_visibility(node, source);
 
     emit_contains_edge(parent_id, &id, result);
@@ -1250,6 +1256,549 @@ fn extract_calls(
     }
 }
 
+fn emit_unique_edge(result: &mut ExtractionResult, edge: Edge) {
+    if result.edges.iter().any(|existing| {
+        existing.source == edge.source
+            && existing.target == edge.target
+            && existing.kind == edge.kind
+            && existing.operation == edge.operation
+    }) {
+        return;
+    }
+    result.edges.push(edge);
+}
+
+fn push_unique_node(result: &mut ExtractionResult, node: Node) {
+    if result.nodes.iter().any(|existing| existing.id == node.id) {
+        return;
+    }
+    result.nodes.push(node);
+}
+
+fn sanitize_id_component(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    for ch in name.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch);
+        } else {
+            out.push('_');
+        }
+    }
+    out.trim_matches('_').to_string()
+}
+
+fn make_swiftui_synthetic_id(
+    owner_id: &str,
+    prefix: &str,
+    name: &str,
+    node: tree_sitter::Node,
+) -> String {
+    let start = node.start_position();
+    let end = node.end_position();
+    format!(
+        "{owner_id}::{prefix}:{}@{}:{}:{}:{}",
+        sanitize_id_component(name),
+        start.row,
+        start.column,
+        end.row,
+        end.column
+    )
+}
+
+fn emit_swiftui_node(
+    result: &mut ExtractionResult,
+    owner_id: &str,
+    parent_id: &str,
+    name: &str,
+    kind: NodeKind,
+    file: &str,
+    node: tree_sitter::Node,
+) -> String {
+    let prefix = match kind {
+        NodeKind::View => "view",
+        NodeKind::Branch => "branch",
+        _ => "synthetic",
+    };
+    let id = make_swiftui_synthetic_id(owner_id, prefix, name, node);
+    push_unique_node(
+        result,
+        Node {
+            id: id.clone(),
+            kind,
+            name: name.to_string(),
+            file: file.into(),
+            span: make_span(node),
+            visibility: Visibility::Private,
+            metadata: HashMap::new(),
+            role: None,
+            signature: None,
+            doc_comment: None,
+            module: None,
+        },
+    );
+    emit_unique_edge(
+        result,
+        Edge {
+            source: parent_id.to_string(),
+            target: id.clone(),
+            kind: EdgeKind::Contains,
+            confidence: 1.0,
+            direction: None,
+            operation: None,
+            condition: None,
+            async_boundary: None,
+        },
+    );
+    id
+}
+
+fn uppercase_identifier(name: &str) -> bool {
+    name.chars()
+        .next()
+        .is_some_and(|ch| ch.is_ascii_uppercase())
+}
+
+fn is_builtin_swiftui_view(name: &str) -> bool {
+    matches!(
+        name,
+        "AnyView"
+            | "Button"
+            | "Color"
+            | "Divider"
+            | "DisclosureGroup"
+            | "EmptyView"
+            | "ForEach"
+            | "Form"
+            | "GeometryReader"
+            | "Grid"
+            | "GridRow"
+            | "Group"
+            | "HStack"
+            | "Image"
+            | "Label"
+            | "LazyHGrid"
+            | "LazyHStack"
+            | "LazyVGrid"
+            | "LazyVStack"
+            | "Link"
+            | "List"
+            | "Menu"
+            | "NavigationLink"
+            | "NavigationStack"
+            | "NavigationView"
+            | "Picker"
+            | "ProgressView"
+            | "ScrollView"
+            | "Section"
+            | "SecureField"
+            | "Spacer"
+            | "TabView"
+            | "Text"
+            | "TextField"
+            | "TimelineView"
+            | "Toggle"
+            | "VStack"
+            | "ZStack"
+    )
+}
+
+fn swiftui_view_name(node: tree_sitter::Node, source: &[u8]) -> Option<String> {
+    let name = simple_identifier_text(node, source)?;
+    uppercase_identifier(&name).then_some(name)
+}
+
+fn call_suffix_lambda_children(node: tree_sitter::Node) -> Vec<tree_sitter::Node> {
+    let mut suffixes = Vec::new();
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if child.kind() == "call_suffix" {
+            let mut suffix_cursor = child.walk();
+            for suffix_child in child.named_children(&mut suffix_cursor) {
+                if suffix_child.kind() == "lambda_literal" {
+                    suffixes.push(suffix_child);
+                }
+            }
+        }
+    }
+    suffixes
+}
+
+fn recurse_swiftui_named_children(
+    node: tree_sitter::Node,
+    source: &[u8],
+    file: &str,
+    module_path: &[String],
+    owner_id: &str,
+    parent_id: &str,
+    result: &mut ExtractionResult,
+) {
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        extract_swiftui_structure(
+            child,
+            source,
+            file,
+            module_path,
+            owner_id,
+            parent_id,
+            result,
+        );
+    }
+}
+
+fn extract_swiftui_if_structure(
+    node: tree_sitter::Node,
+    source: &[u8],
+    file: &str,
+    module_path: &[String],
+    owner_id: &str,
+    parent_id: &str,
+    result: &mut ExtractionResult,
+) {
+    let condition = node
+        .child_by_field_name("condition")
+        .and_then(|condition| condition.utf8_text(source).ok())
+        .map(|text| format!("if {}", text.trim()))
+        .filter(|text| text != "if");
+
+    let mut named_children = Vec::new();
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if matches!(child.kind(), "statements" | "if_statement") {
+            named_children.push(child);
+        }
+    }
+
+    if let Some(then_child) = named_children.first().copied() {
+        let branch_id = emit_swiftui_node(
+            result,
+            owner_id,
+            parent_id,
+            condition.as_deref().unwrap_or("if"),
+            NodeKind::Branch,
+            file,
+            then_child,
+        );
+        extract_swiftui_structure(
+            then_child,
+            source,
+            file,
+            module_path,
+            owner_id,
+            &branch_id,
+            result,
+        );
+    }
+
+    if let Some(else_child) = named_children.get(1).copied() {
+        let branch_id = emit_swiftui_node(
+            result,
+            owner_id,
+            parent_id,
+            "else",
+            NodeKind::Branch,
+            file,
+            else_child,
+        );
+        extract_swiftui_structure(
+            else_child,
+            source,
+            file,
+            module_path,
+            owner_id,
+            &branch_id,
+            result,
+        );
+    }
+}
+
+fn switch_entry_label(node: tree_sitter::Node, source: &[u8]) -> String {
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        match child.kind() {
+            "default_keyword" => return "default".to_string(),
+            "switch_pattern" => {
+                if let Ok(text) = child.utf8_text(source) {
+                    return format!("case {}", text.trim());
+                }
+            }
+            _ => {}
+        }
+    }
+    "case".to_string()
+}
+
+fn extract_swiftui_switch_structure(
+    node: tree_sitter::Node,
+    source: &[u8],
+    file: &str,
+    module_path: &[String],
+    owner_id: &str,
+    parent_id: &str,
+    result: &mut ExtractionResult,
+) {
+    let label = node
+        .child_by_field_name("expr")
+        .and_then(|expr| expr.utf8_text(source).ok())
+        .map(|text| format!("switch {}", text.trim()))
+        .unwrap_or_else(|| "switch".to_string());
+    let switch_id = emit_swiftui_node(
+        result,
+        owner_id,
+        parent_id,
+        &label,
+        NodeKind::Branch,
+        file,
+        node,
+    );
+
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if child.kind() != "switch_entry" {
+            continue;
+        }
+        let case_id = emit_swiftui_node(
+            result,
+            owner_id,
+            &switch_id,
+            &switch_entry_label(child, source),
+            NodeKind::Branch,
+            file,
+            child,
+        );
+        let mut case_cursor = child.walk();
+        for case_child in child.named_children(&mut case_cursor) {
+            if case_child.kind() == "statements" {
+                extract_swiftui_structure(
+                    case_child,
+                    source,
+                    file,
+                    module_path,
+                    owner_id,
+                    &case_id,
+                    result,
+                );
+            }
+        }
+    }
+}
+
+fn extract_swiftui_structure(
+    node: tree_sitter::Node,
+    source: &[u8],
+    file: &str,
+    module_path: &[String],
+    owner_id: &str,
+    parent_id: &str,
+    result: &mut ExtractionResult,
+) {
+    match node.kind() {
+        "statements" | "lambda_literal" | "computed_property" => {
+            recurse_swiftui_named_children(
+                node,
+                source,
+                file,
+                module_path,
+                owner_id,
+                parent_id,
+                result,
+            );
+        }
+        "call_expression" => {
+            if let Some(name) = swiftui_view_name(node, source) {
+                let view_id = emit_swiftui_node(
+                    result,
+                    owner_id,
+                    parent_id,
+                    &name,
+                    NodeKind::View,
+                    file,
+                    node,
+                );
+                if !is_builtin_swiftui_view(&name) {
+                    emit_unique_edge(
+                        result,
+                        Edge {
+                            source: view_id.clone(),
+                            target: make_id(file, module_path, &name),
+                            kind: EdgeKind::TypeRef,
+                            confidence: 0.85,
+                            direction: None,
+                            operation: None,
+                            condition: None,
+                            async_boundary: None,
+                        },
+                    );
+                }
+                for lambda in call_suffix_lambda_children(node) {
+                    extract_swiftui_structure(
+                        lambda,
+                        source,
+                        file,
+                        module_path,
+                        owner_id,
+                        &view_id,
+                        result,
+                    );
+                }
+            } else {
+                recurse_swiftui_named_children(
+                    node,
+                    source,
+                    file,
+                    module_path,
+                    owner_id,
+                    parent_id,
+                    result,
+                );
+            }
+        }
+        "if_statement" => {
+            extract_swiftui_if_structure(
+                node,
+                source,
+                file,
+                module_path,
+                owner_id,
+                parent_id,
+                result,
+            );
+        }
+        "switch_statement" => {
+            extract_swiftui_switch_structure(
+                node,
+                source,
+                file,
+                module_path,
+                owner_id,
+                parent_id,
+                result,
+            );
+        }
+        _ => {
+            recurse_swiftui_named_children(
+                node,
+                source,
+                file,
+                module_path,
+                owner_id,
+                parent_id,
+                result,
+            );
+        }
+    }
+}
+
+fn extract_swiftui_body_structure(
+    node: tree_sitter::Node,
+    source: &[u8],
+    file: &str,
+    module_path: &[String],
+    body_id: &str,
+    result: &mut ExtractionResult,
+) {
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if child.kind() == "computed_property" {
+            extract_swiftui_structure(child, source, file, module_path, body_id, body_id, result);
+        }
+    }
+}
+
+fn file_matches(node_file: &Path, file_path: &Path) -> bool {
+    let node_file = node_file.to_string_lossy();
+    let file_path = file_path.to_string_lossy();
+    node_file == file_path
+        || node_file.ends_with(file_path.as_ref())
+        || file_path.ends_with(node_file.as_ref())
+        || node_file
+            .rsplit('/')
+            .next()
+            .zip(file_path.rsplit('/').next())
+            .is_some_and(|(left, right)| left == right)
+}
+
+fn line_matches(node_line: usize, ast_row_zero_based: usize) -> bool {
+    node_line == ast_row_zero_based || node_line == ast_row_zero_based + 1
+}
+
+fn collect_swiftui_body_nodes<'a>(
+    node: tree_sitter::Node<'a>,
+    source: &[u8],
+    out: &mut Vec<tree_sitter::Node<'a>>,
+) {
+    if node.kind() == "class_declaration" {
+        let conformances = collect_inheritance_names(node, source);
+        let conforms_to_view = conformances.iter().any(|c| c == "View" || c == "App");
+        if conforms_to_view {
+            let mut cursor = node.walk();
+            for child in node.named_children(&mut cursor) {
+                if child.kind() != "class_body" {
+                    continue;
+                }
+                let mut body_cursor = child.walk();
+                for body_child in child.named_children(&mut body_cursor) {
+                    if body_child.kind() == "property_declaration"
+                        && let Some(name) = find_pattern_name(body_child, source)
+                        && name == "body"
+                    {
+                        out.push(body_child);
+                    }
+                }
+            }
+        }
+    }
+
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_swiftui_body_nodes(child, source, out);
+    }
+}
+
+fn matching_body_id(
+    result: &ExtractionResult,
+    file_path: &Path,
+    body_node: tree_sitter::Node,
+) -> Option<String> {
+    let body_line = body_node.start_position().row;
+    result
+        .nodes
+        .iter()
+        .filter(|node| {
+            node.kind == NodeKind::Property
+                && node.name == "body"
+                && file_matches(&node.file, file_path)
+                && line_matches(node.span.start[0], body_line)
+        })
+        .min_by_key(|node| node.span.start[0].abs_diff(body_line))
+        .map(|node| node.id.clone())
+}
+
+pub fn enrich_swiftui_structure(
+    source: &[u8],
+    file_path: &Path,
+    result: &mut ExtractionResult,
+) -> anyhow::Result<()> {
+    let mut parser = Parser::new();
+    parser.set_language(&tree_sitter_swift::LANGUAGE.into())?;
+    let tree = parser
+        .parse(source, None)
+        .ok_or_else(|| anyhow::anyhow!("tree-sitter failed to parse Swift source"))?;
+
+    let mut body_nodes = Vec::new();
+    collect_swiftui_body_nodes(tree.root_node(), source, &mut body_nodes);
+
+    let file_str = file_path.to_string_lossy().to_string();
+    for body_node in body_nodes {
+        let Some(body_id) = matching_body_id(result, file_path, body_node) else {
+            continue;
+        };
+        extract_swiftui_body_structure(body_node, source, &file_str, &[], &body_id, result);
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1431,6 +1980,295 @@ mod tests {
     }
 
     #[test]
+    fn scopes_body_ids_per_view_type() {
+        let result = extract(
+            r#"
+            struct FirstView: View {
+                var body: some View { Text("One") }
+            }
+
+            struct SecondView: View {
+                var body: some View { Text("Two") }
+            }
+            "#,
+        );
+
+        let body_ids: Vec<&str> = result
+            .nodes
+            .iter()
+            .filter(|n| n.name == "body" && n.kind == NodeKind::Property)
+            .map(|n| n.id.as_str())
+            .collect();
+
+        assert_eq!(body_ids.len(), 2);
+        assert!(body_ids.contains(&"test.swift::FirstView::body"));
+        assert!(body_ids.contains(&"test.swift::SecondView::body"));
+    }
+
+    #[test]
+    fn extracts_swiftui_view_hierarchy_and_type_refs() {
+        let result = extract(
+            r#"
+            import SwiftUI
+
+            struct Row: View {
+                let title: String
+                var body: some View { Text(title) }
+            }
+
+            struct ContentView: View {
+                var body: some View {
+                    VStack {
+                        Text("Hello")
+                        Row(title: "World")
+                    }
+                }
+            }
+            "#,
+        );
+
+        let body = result
+            .nodes
+            .iter()
+            .find(|n| n.id == "test.swift::ContentView::body")
+            .expect("content body node should exist");
+        let vstack = result
+            .nodes
+            .iter()
+            .find(|n| n.kind == NodeKind::View && n.name == "VStack")
+            .expect("VStack synthetic view should exist");
+        let row_view = result
+            .nodes
+            .iter()
+            .find(|n| n.kind == NodeKind::View && n.name == "Row")
+            .expect("Row synthetic view should exist");
+        let vstack_children: Vec<&Node> = result
+            .edges
+            .iter()
+            .filter(|edge| edge.source == vstack.id && edge.kind == EdgeKind::Contains)
+            .filter_map(|edge| result.nodes.iter().find(|node| node.id == edge.target))
+            .collect();
+
+        assert!(has_edge(&result, &body.id, &vstack.id, EdgeKind::Contains));
+        assert_eq!(
+            vstack_children
+                .iter()
+                .map(|node| node.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Text", "Row"]
+        );
+        assert!(has_edge(
+            &result,
+            &row_view.id,
+            "test.swift::Row",
+            EdgeKind::TypeRef
+        ));
+    }
+
+    #[test]
+    fn extracts_swiftui_branch_hierarchy() {
+        let result = extract(
+            r#"
+            import SwiftUI
+
+            struct ContentView: View {
+                var body: some View {
+                    VStack {
+                        if showDetails {
+                            Group {
+                                Text("More")
+                            }
+                        } else {
+                            switch mode {
+                            case .empty:
+                                EmptyView()
+                            default:
+                                ForEach(items) { item in
+                                    Text(item.name)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            "#,
+        );
+
+        let vstack = result
+            .nodes
+            .iter()
+            .find(|n| n.kind == NodeKind::View && n.name == "VStack")
+            .expect("VStack should exist");
+        let if_branch = result
+            .nodes
+            .iter()
+            .find(|n| n.kind == NodeKind::Branch && n.name == "if showDetails")
+            .expect("if branch should exist");
+        let else_branch = result
+            .nodes
+            .iter()
+            .find(|n| n.kind == NodeKind::Branch && n.name == "else")
+            .expect("else branch should exist");
+        let switch_branch = result
+            .nodes
+            .iter()
+            .find(|n| n.kind == NodeKind::Branch && n.name == "switch mode")
+            .expect("switch branch should exist");
+        let default_branch = result
+            .nodes
+            .iter()
+            .find(|n| n.kind == NodeKind::Branch && n.name == "default")
+            .expect("default branch should exist");
+        let for_each = result
+            .nodes
+            .iter()
+            .find(|n| n.kind == NodeKind::View && n.name == "ForEach")
+            .expect("ForEach view should exist");
+
+        assert!(has_edge(
+            &result,
+            &vstack.id,
+            &if_branch.id,
+            EdgeKind::Contains
+        ));
+        assert!(has_edge(
+            &result,
+            &vstack.id,
+            &else_branch.id,
+            EdgeKind::Contains
+        ));
+        assert!(has_edge(
+            &result,
+            &else_branch.id,
+            &switch_branch.id,
+            EdgeKind::Contains
+        ));
+        assert!(has_edge(
+            &result,
+            &switch_branch.id,
+            &default_branch.id,
+            EdgeKind::Contains
+        ));
+        assert!(has_edge(
+            &result,
+            &default_branch.id,
+            &for_each.id,
+            EdgeKind::Contains
+        ));
+    }
+
+    #[test]
+    fn enrich_swiftui_structure_overlays_synthetic_nodes_without_duplicating_declarations() {
+        let source = br#"
+import SwiftUI
+
+struct Row: View {
+    let title: String
+    var body: some View { Text(title) }
+}
+
+struct ContentView: View {
+    var body: some View {
+        VStack {
+            Text("Hello")
+            Row(title: "World")
+        }
+    }
+}
+"#;
+        let mut result = ExtractionResult::new();
+        result.nodes.push(Node {
+            id: "s:Row".into(),
+            kind: NodeKind::Struct,
+            name: "Row".into(),
+            file: "test.swift".into(),
+            span: Span {
+                start: [3, 0],
+                end: [6, 0],
+            },
+            visibility: Visibility::Public,
+            metadata: HashMap::new(),
+            role: None,
+            signature: None,
+            doc_comment: None,
+            module: None,
+        });
+        result.nodes.push(Node {
+            id: "s:ContentView".into(),
+            kind: NodeKind::Struct,
+            name: "ContentView".into(),
+            file: "test.swift".into(),
+            span: Span {
+                start: [8, 0],
+                end: [15, 0],
+            },
+            visibility: Visibility::Public,
+            metadata: HashMap::new(),
+            role: None,
+            signature: None,
+            doc_comment: None,
+            module: None,
+        });
+        result.nodes.push(Node {
+            id: "s:ContentView.body".into(),
+            kind: NodeKind::Property,
+            name: "body".into(),
+            file: "test.swift".into(),
+            span: Span {
+                start: [9, 4],
+                end: [14, 5],
+            },
+            visibility: Visibility::Public,
+            metadata: HashMap::new(),
+            role: Some(NodeRole::EntryPoint),
+            signature: None,
+            doc_comment: None,
+            module: None,
+        });
+
+        enrich_swiftui_structure(source, Path::new("test.swift"), &mut result).unwrap();
+
+        let view_nodes: Vec<&Node> = result
+            .nodes
+            .iter()
+            .filter(|n| n.kind == NodeKind::View)
+            .collect();
+        assert!(
+            !view_nodes.is_empty(),
+            "overlay should add synthetic view nodes"
+        );
+        assert_eq!(
+            result
+                .nodes
+                .iter()
+                .filter(|n| n.kind == NodeKind::Property && n.name == "body")
+                .count(),
+            1,
+            "overlay should not duplicate declaration nodes"
+        );
+        let vstack = view_nodes
+            .iter()
+            .find(|n| n.name == "VStack")
+            .expect("overlay should add VStack");
+        assert!(has_edge(
+            &result,
+            "s:ContentView.body",
+            &vstack.id,
+            EdgeKind::Contains
+        ));
+        let row_view = view_nodes
+            .iter()
+            .find(|n| n.name == "Row")
+            .expect("overlay should add Row instance");
+        assert!(has_edge(
+            &result,
+            &row_view.id,
+            "test.swift::Row",
+            EdgeKind::TypeRef
+        ));
+    }
+
+    #[test]
     fn extracts_function_signature() {
         let result = extract("func greet(name: String) -> String { return name }");
         let node = find_node(&result, "greet");
@@ -1550,7 +2388,7 @@ class GameManager {
 
         enrich_doc_comments(source, &mut result).unwrap();
 
-        let game_mgr = result
+        let _game_mgr = result
             .nodes
             .iter()
             .find(|n| n.name == "GameManager")

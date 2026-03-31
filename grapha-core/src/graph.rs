@@ -18,6 +18,8 @@ pub enum NodeKind {
     TypeAlias,
     Protocol,  // Swift protocols
     Extension, // Swift extensions
+    View,      // Synthetic SwiftUI view tree node
+    Branch,    // Synthetic SwiftUI branch node
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -216,6 +218,11 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&NodeKind::Extension).unwrap(),
             "\"extension\""
+        );
+        assert_eq!(serde_json::to_string(&NodeKind::View).unwrap(), "\"view\"");
+        assert_eq!(
+            serde_json::to_string(&NodeKind::Branch).unwrap(),
+            "\"branch\""
         );
     }
 

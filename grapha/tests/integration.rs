@@ -100,6 +100,44 @@ fn compact_flag_produces_grouped_output() {
 }
 
 #[test]
+fn compact_flag_preserves_swiftui_hierarchy() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("ContentView.swift"),
+        r#"
+        import SwiftUI
+
+        struct Row: View {
+            let title: String
+            var body: some View { Text(title) }
+        }
+
+        struct ContentView: View {
+            var body: some View {
+                VStack {
+                    Text("Hello")
+                    Row(title: "World")
+                }
+            }
+        }
+        "#,
+    )
+    .unwrap();
+
+    grapha()
+        .args(["analyze", dir.path().to_str().unwrap(), "--compact"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"kind\": \"view\""))
+        .stdout(predicate::str::contains("\"name\": \"body\""))
+        .stdout(predicate::str::contains("\"members\": ["))
+        .stdout(predicate::str::contains("\"VStack\""))
+        .stdout(predicate::str::contains("\"Text\""))
+        .stdout(predicate::str::contains("\"Row\""))
+        .stdout(predicate::str::contains("\"type_refs\": ["));
+}
+
+#[test]
 fn output_contains_version() {
     grapha()
         .args(["analyze", "tests/fixtures/simple.rs"])

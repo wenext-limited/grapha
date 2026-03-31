@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use serde::Serialize;
 
-use grapha_core::graph::{EdgeKind, Graph, Node};
+use grapha_core::graph::{EdgeKind, Graph, Node, NodeKind};
 
 use super::{QueryResolveError, SymbolRef};
 
@@ -32,6 +32,10 @@ fn to_symbol_ref(node: &Node) -> SymbolRef {
         kind: node.kind,
         file: node.file.to_string_lossy().to_string(),
     }
+}
+
+fn is_structural_node(node: &Node) -> bool {
+    matches!(node.kind, NodeKind::View | NodeKind::Branch)
 }
 
 fn node_sort_key(node_id: &str, node_index: &HashMap<&str, &Node>) -> (String, String, String) {
@@ -79,15 +83,27 @@ pub fn query_impact(
 
     let mut reverse_adj: HashMap<&str, Vec<&str>> = HashMap::new();
     for edge in &graph.edges {
-        if matches!(
+        if !matches!(
             edge.kind,
             EdgeKind::Calls | EdgeKind::Implements | EdgeKind::TypeRef | EdgeKind::Inherits
         ) {
-            reverse_adj
-                .entry(&edge.target)
-                .or_default()
-                .push(&edge.source);
+            continue;
         }
+
+        let Some(source_node) = node_index.get(edge.source.as_str()).copied() else {
+            continue;
+        };
+        let Some(target_node) = node_index.get(edge.target.as_str()).copied() else {
+            continue;
+        };
+        if is_structural_node(source_node) || is_structural_node(target_node) {
+            continue;
+        }
+
+        reverse_adj
+            .entry(&edge.target)
+            .or_default()
+            .push(&edge.source);
     }
     for dependents in reverse_adj.values_mut() {
         dependents.sort_unstable_by_key(|node_id| node_sort_key(node_id, &node_index));
@@ -360,5 +376,62 @@ mod tests {
         let result = query_impact(&graph, "source", 5).unwrap();
         assert_eq!(result.total_affected, 1);
         assert_eq!(result.depth_1[0].name, "alpha");
+    }
+
+    #[test]
+    fn impact_ignores_swiftui_structural_nodes() {
+        let graph = Graph {
+            version: "0.1.0".to_string(),
+            nodes: vec![
+                Node {
+                    id: "source".into(),
+                    kind: NodeKind::Function,
+                    name: "source".into(),
+                    file: "test.swift".into(),
+                    span: Span {
+                        start: [0, 0],
+                        end: [1, 0],
+                    },
+                    visibility: Visibility::Public,
+                    metadata: StdHashMap::new(),
+                    role: None,
+                    signature: None,
+                    doc_comment: None,
+                    module: None,
+                },
+                Node {
+                    id: "body::view:Row@10:12".into(),
+                    kind: NodeKind::View,
+                    name: "Row".into(),
+                    file: "test.swift".into(),
+                    span: Span {
+                        start: [10, 12],
+                        end: [10, 28],
+                    },
+                    visibility: Visibility::Private,
+                    metadata: StdHashMap::new(),
+                    role: None,
+                    signature: None,
+                    doc_comment: None,
+                    module: None,
+                },
+            ],
+            edges: vec![Edge {
+                source: "body::view:Row@10:12".into(),
+                target: "source".into(),
+                kind: EdgeKind::TypeRef,
+                confidence: 0.9,
+                direction: None,
+                operation: None,
+                condition: None,
+                async_boundary: None,
+            }],
+        };
+
+        let result = query_impact(&graph, "source", 5).unwrap();
+        assert_eq!(result.total_affected, 0);
+        assert!(result.depth_1.is_empty());
+        assert!(result.depth_2.is_empty());
+        assert!(result.depth_3_plus.is_empty());
     }
 }

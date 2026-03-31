@@ -358,6 +358,61 @@ mod tests {
     }
 
     #[test]
+    fn ignores_swiftui_structural_edges() {
+        let graph = Graph {
+            version: "0.1.0".to_string(),
+            nodes: vec![
+                Node {
+                    id: "body".into(),
+                    kind: NodeKind::Property,
+                    name: "body".into(),
+                    file: PathBuf::from("ContentView.swift"),
+                    span: Span {
+                        start: [0, 0],
+                        end: [1, 0],
+                    },
+                    visibility: Visibility::Public,
+                    metadata: StdHashMap::new(),
+                    role: Some(NodeRole::EntryPoint),
+                    signature: None,
+                    doc_comment: None,
+                    module: None,
+                },
+                Node {
+                    id: "body::view:VStack@1:0".into(),
+                    kind: NodeKind::View,
+                    name: "VStack".into(),
+                    file: PathBuf::from("ContentView.swift"),
+                    span: Span {
+                        start: [1, 0],
+                        end: [2, 0],
+                    },
+                    visibility: Visibility::Private,
+                    metadata: StdHashMap::new(),
+                    role: None,
+                    signature: None,
+                    doc_comment: None,
+                    module: None,
+                },
+                make_node(
+                    "db_save",
+                    Some(NodeRole::Terminal {
+                        kind: TerminalKind::Persistence,
+                    }),
+                ),
+            ],
+            edges: vec![
+                make_edge("body", "body::view:VStack@1:0", EdgeKind::Contains),
+                make_edge("body::view:VStack@1:0", "db_save", EdgeKind::TypeRef),
+            ],
+        };
+
+        let result = query_trace(&graph, "body", 10).unwrap();
+        assert!(result.flows.is_empty());
+        assert_eq!(result.summary.total_flows, 0);
+    }
+
+    #[test]
     fn respects_max_depth() {
         let graph = Graph {
             version: "0.1.0".to_string(),

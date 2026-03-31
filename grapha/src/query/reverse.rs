@@ -517,4 +517,47 @@ mod tests {
             vec!["body", "viewModel", "sendMessage", "handleSendResult"]
         );
     }
+
+    #[test]
+    fn ignores_swiftui_structural_edges() {
+        let graph = Graph {
+            version: "0.1.0".to_string(),
+            nodes: vec![
+                make_node(
+                    "body",
+                    "body",
+                    NodeKind::Property,
+                    Some(NodeRole::EntryPoint),
+                ),
+                make_node("body::view:Row@10:12", "Row", NodeKind::View, None),
+                make_node("row_decl", "Row", NodeKind::Struct, None),
+            ],
+            edges: vec![
+                Edge {
+                    source: "body".into(),
+                    target: "body::view:Row@10:12".into(),
+                    kind: EdgeKind::Contains,
+                    confidence: 1.0,
+                    direction: None,
+                    operation: None,
+                    condition: None,
+                    async_boundary: None,
+                },
+                Edge {
+                    source: "body::view:Row@10:12".into(),
+                    target: "row_decl".into(),
+                    kind: EdgeKind::TypeRef,
+                    confidence: 0.9,
+                    direction: None,
+                    operation: None,
+                    condition: None,
+                    async_boundary: None,
+                },
+            ],
+        };
+
+        let result = query_reverse(&graph, "Row").unwrap();
+        assert_eq!(result.total_entries, 0);
+        assert!(result.affected_entries.is_empty());
+    }
 }

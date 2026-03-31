@@ -56,7 +56,16 @@ fn kind_preference(kind: NodeKind) -> usize {
         NodeKind::Function => 0,
         NodeKind::Property => 1,
         NodeKind::Variant | NodeKind::Field => 2,
-        _ => 3,
+        NodeKind::Struct
+        | NodeKind::Enum
+        | NodeKind::Trait
+        | NodeKind::Impl
+        | NodeKind::Module
+        | NodeKind::Constant
+        | NodeKind::TypeAlias
+        | NodeKind::Protocol
+        | NodeKind::Extension => 3,
+        NodeKind::View | NodeKind::Branch => 4,
     }
 }
 
@@ -163,6 +172,8 @@ pub struct ContextResult {
     pub symbol: SymbolInfo,
     pub callers: Vec<SymbolRef>,
     pub callees: Vec<SymbolRef>,
+    pub contains: Vec<SymbolRef>,
+    pub contained_by: Vec<SymbolRef>,
     pub implementors: Vec<SymbolRef>,
     pub implements: Vec<SymbolRef>,
     pub type_refs: Vec<SymbolRef>,
@@ -295,5 +306,27 @@ mod tests {
 
         let resolved = resolve_node(&nodes, "GiftServiceCore.swift::sendGift").unwrap();
         assert_eq!(resolved.file, PathBuf::from("GiftServiceCore.swift"));
+    }
+
+    #[test]
+    fn bare_symbol_prefers_real_declarations_over_swiftui_synthetic_nodes() {
+        let nodes = vec![
+            make_node(
+                "ContentView.swift::ContentView::body::view:Row@10:12",
+                "Row",
+                NodeKind::View,
+                "ContentView.swift",
+            ),
+            make_node(
+                "ContentView.swift::Row",
+                "Row",
+                NodeKind::Struct,
+                "ContentView.swift",
+            ),
+        ];
+
+        let resolved = resolve_node(&nodes, "Row").unwrap();
+        assert_eq!(resolved.kind, NodeKind::Struct);
+        assert_eq!(resolved.id, "ContentView.swift::Row");
     }
 }

@@ -20,6 +20,8 @@ pub fn parse_filter(filter: &str) -> anyhow::Result<HashSet<NodeKind>> {
             "typealias" | "type_alias" => NodeKind::TypeAlias,
             "protocol" => NodeKind::Protocol,
             "extension" | "ext" => NodeKind::Extension,
+            "view" => NodeKind::View,
+            "branch" => NodeKind::Branch,
             other => anyhow::bail!("unknown node kind: '{other}'"),
         };
         kinds.insert(kind);

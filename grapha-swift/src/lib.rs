@@ -141,11 +141,13 @@ pub fn extract_swift(
         if let Some(mut result) = indexstore::extract_from_indexstore(&canonical_file, store_path) {
             // Index store doesn't provide doc comments — enrich via tree-sitter.
             let _ = treesitter::enrich_doc_comments(source, &mut result);
+            let _ = treesitter::enrich_swiftui_structure(source, file_path, &mut result);
             return Ok(result);
         }
     }
 
-    if let Some(result) = swiftsyntax::extract_with_swiftsyntax(source, file_path) {
+    if let Some(mut result) = swiftsyntax::extract_with_swiftsyntax(source, file_path) {
+        let _ = treesitter::enrich_swiftui_structure(source, file_path, &mut result);
         return Ok(result);
     }
 

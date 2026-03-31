@@ -58,6 +58,8 @@ body { background: #1a1a2e; color: #e0e0e0; font-family: -apple-system, BlinkMac
     <option value="struct">Structs</option>
     <option value="enum">Enums</option>
     <option value="trait">Traits</option>
+    <option value="view">Views</option>
+    <option value="branch">Branches</option>
     <option value="entry_point">Entry Points</option>
     <option value="terminal">Terminals</option>
   </select>
@@ -69,6 +71,8 @@ body { background: #1a1a2e; color: #e0e0e0; font-family: -apple-system, BlinkMac
       <div><span class="dot" style="background:#f44336"></span> Terminal (write)</div>
       <div><span class="dot" style="background:#2196F3"></span> Terminal (read)</div>
       <div><span class="dot" style="background:#FF9800"></span> Terminal (event)</div>
+      <div><span class="dot" style="background:#53a8b6"></span> SwiftUI View</div>
+      <div><span class="dot" style="background:#f4c95d"></span> SwiftUI Branch</div>
       <div><span class="dot" style="background:#9E9E9E"></span> Internal</div>
     </div>
   </div>
@@ -80,6 +84,8 @@ body { background: #1a1a2e; color: #e0e0e0; font-family: -apple-system, BlinkMac
     <div class="field"><div class="label">Signature</div><div class="value" id="detail-sig"></div></div>
     <div class="field"><div class="label">Callers</div><ul class="list" id="detail-callers"></ul></div>
     <div class="field"><div class="label">Callees</div><ul class="list" id="detail-callees"></ul></div>
+    <div class="field"><div class="label">Contains</div><ul class="list" id="detail-contains"></ul></div>
+    <div class="field"><div class="label">Contained By</div><ul class="list" id="detail-contained-by"></ul></div>
   </div>
 </div>
 <script>
@@ -99,6 +105,8 @@ function nodeColor(node) {
       return '#2196F3';
     }
   }
+  if (node.kind === 'view') return '#53a8b6';
+  if (node.kind === 'branch') return '#f4c95d';
   return '#9E9E9E';
 }
 
@@ -112,6 +120,8 @@ function findEdgeDirection(nodeId) {
 
 function nodeShape(node) {
   if (node.role && node.role.type === 'entry_point') return 'diamond';
+  if (node.kind === 'view') return 'box';
+  if (node.kind === 'branch') return 'triangle';
   return 'dot';
 }
 
@@ -168,6 +178,16 @@ function renderGraph(nodes, edges) {
 
 async function showDetail(nodeId) {
   const panel = document.getElementById('detail-panel');
+  const setList = (id, items) => {
+    const list = document.getElementById(id);
+    list.innerHTML = '';
+    (items || []).forEach(item => {
+      const li = document.createElement('li');
+      li.textContent = item.name;
+      li.onclick = () => { network.selectNodes([item.id]); showDetail(item.id); };
+      list.appendChild(li);
+    });
+  };
   try {
     const res = await fetch(API + '/api/context/' + encodeURIComponent(nodeId));
     if (!res.ok) { panel.classList.remove('visible'); return; }
@@ -178,22 +198,10 @@ async function showDetail(nodeId) {
     document.getElementById('detail-role').textContent = node && node.role ? JSON.stringify(node.role) : 'none';
     document.getElementById('detail-file').textContent = ctx.symbol.file;
     document.getElementById('detail-sig').textContent = node && node.signature ? node.signature : '-';
-    const callersList = document.getElementById('detail-callers');
-    callersList.innerHTML = '';
-    (ctx.callers || []).forEach(c => {
-      const li = document.createElement('li');
-      li.textContent = c.name;
-      li.onclick = () => { network.selectNodes([c.id]); showDetail(c.id); };
-      callersList.appendChild(li);
-    });
-    const calleesList = document.getElementById('detail-callees');
-    calleesList.innerHTML = '';
-    (ctx.callees || []).forEach(c => {
-      const li = document.createElement('li');
-      li.textContent = c.name;
-      li.onclick = () => { network.selectNodes([c.id]); showDetail(c.id); };
-      calleesList.appendChild(li);
-    });
+    setList('detail-callers', ctx.callers);
+    setList('detail-callees', ctx.callees);
+    setList('detail-contains', ctx.contains);
+    setList('detail-contained-by', ctx.contained_by);
     panel.classList.add('visible');
   } catch (_) {
     panel.classList.remove('visible');

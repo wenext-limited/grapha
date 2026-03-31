@@ -211,3 +211,57 @@ fn impact_tree_format_works() {
         .stdout(predicate::str::contains("└──"))
         .stdout(predicate::str::contains("\"source\"").not());
 }
+
+#[test]
+fn context_tree_for_swiftui_body_shows_structure() {
+    let dir = tempfile::tempdir().unwrap();
+    let store_dir = dir.path().join(".grapha");
+    std::fs::write(
+        dir.path().join("ContentView.swift"),
+        r#"
+        import SwiftUI
+
+        struct ContentView: View {
+            var body: some View {
+                VStack {
+                    Text("Hello")
+                }
+            }
+        }
+        "#,
+    )
+    .unwrap();
+
+    grapha()
+        .args([
+            "index",
+            dir.path().to_str().unwrap(),
+            "--store-dir",
+            store_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    grapha()
+        .args([
+            "context",
+            "body",
+            "-p",
+            dir.path().to_str().unwrap(),
+            "--format",
+            "tree",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "body [property] (ContentView.swift)",
+        ))
+        .stdout(predicate::str::contains("contains (1)"))
+        .stdout(predicate::str::contains(
+            "VStack [view] (ContentView.swift)",
+        ))
+        .stdout(predicate::str::contains("contained_by (1)"))
+        .stdout(predicate::str::contains(
+            "ContentView [struct] (ContentView.swift)",
+        ));
+}

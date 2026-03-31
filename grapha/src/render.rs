@@ -182,11 +182,13 @@ fn reverse_leaf_label(entry: &AffectedEntry) -> String {
 
 pub fn render_context(result: &ContextResult) -> String {
     let sections = [
-        ("callers", sorted_symbol_refs(&result.callers)),
-        ("callees", sorted_symbol_refs(&result.callees)),
-        ("implementors", sorted_symbol_refs(&result.implementors)),
-        ("implements", sorted_symbol_refs(&result.implements)),
-        ("type_refs", sorted_symbol_refs(&result.type_refs)),
+        ("callers", result.callers.clone()),
+        ("callees", result.callees.clone()),
+        ("contains", result.contains.clone()),
+        ("contained_by", result.contained_by.clone()),
+        ("implementors", result.implementors.clone()),
+        ("implements", result.implements.clone()),
+        ("type_refs", result.type_refs.clone()),
     ];
 
     let children = sections
@@ -339,6 +341,8 @@ mod tests {
             symbol: symbol_info("helper", NodeKind::Function, "main.rs"),
             callers: vec![symbol_ref("main", NodeKind::Function, "main.rs")],
             callees: Vec::new(),
+            contains: Vec::new(),
+            contained_by: Vec::new(),
             implementors: Vec::new(),
             implements: Vec::new(),
             type_refs: Vec::new(),
@@ -350,6 +354,34 @@ mod tests {
         assert!(rendered.contains("main [function] (main.rs)"));
         assert!(!rendered.contains("callees"));
         assert!(rendered.contains("└──"));
+    }
+
+    #[test]
+    fn context_renders_structural_sections() {
+        let result = ContextResult {
+            symbol: symbol_info("body", NodeKind::Property, "ContentView.swift"),
+            callers: Vec::new(),
+            callees: Vec::new(),
+            contains: vec![
+                symbol_ref("VStack", NodeKind::View, "ContentView.swift"),
+                symbol_ref("Text", NodeKind::View, "ContentView.swift"),
+            ],
+            contained_by: vec![symbol_ref(
+                "ContentView",
+                NodeKind::Struct,
+                "ContentView.swift",
+            )],
+            implementors: Vec::new(),
+            implements: Vec::new(),
+            type_refs: Vec::new(),
+        };
+
+        let rendered = render_context(&result);
+        assert!(rendered.contains("contains (2)"));
+        assert!(rendered.contains("VStack [view] (ContentView.swift)"));
+        assert!(rendered.contains("Text [view] (ContentView.swift)"));
+        assert!(rendered.contains("contained_by (1)"));
+        assert!(rendered.contains("ContentView [struct] (ContentView.swift)"));
     }
 
     #[test]

@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use grapha_core::extract::ExtractionResult;
-use grapha_core::graph::{EdgeKind, Graph};
+use grapha_core::graph::{EdgeKind, Graph, NodeKind};
 
 /// Entry in the name-to-candidates index: (node_id, module).
 struct NameEntry {
@@ -54,6 +54,9 @@ pub fn merge(results: Vec<ExtractionResult>) -> Graph {
     // Build name → vec of (node_id, module) for cross-file lookup
     let mut name_to_entries: HashMap<&str, Vec<NameEntry>> = HashMap::new();
     for node in &graph.nodes {
+        if matches!(node.kind, NodeKind::View | NodeKind::Branch) {
+            continue;
+        }
         name_to_entries
             .entry(node.name.as_str())
             .or_default()
