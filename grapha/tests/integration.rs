@@ -234,6 +234,68 @@ fn repeated_index_uses_incremental_store_and_search() {
 }
 
 #[test]
+fn dataflow_command_outputs_json_and_tree() {
+    let dir = tempfile::tempdir().unwrap();
+    let store_dir = dir.path().join(".grapha");
+    std::fs::write(
+        dir.path().join("main.rs"),
+        "pub fn handler() { persist(); }\nfn persist() {}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("grapha.toml"),
+        r#"
+[[classifiers]]
+pattern = "persist"
+terminal = "persistence"
+direction = "read_write"
+operation = "UPSERT"
+"#,
+    )
+    .unwrap();
+
+    grapha()
+        .args([
+            "index",
+            dir.path().to_str().unwrap(),
+            "--store-dir",
+            store_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    grapha()
+        .args([
+            "dataflow",
+            "handler",
+            "-p",
+            dir.path().to_str().unwrap(),
+            "--format",
+            "json",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"kind\": \"effect\""))
+        .stdout(predicate::str::contains("\"kind\": \"read\""))
+        .stdout(predicate::str::contains("\"kind\": \"write\""));
+
+    grapha()
+        .args([
+            "dataflow",
+            "handler",
+            "-p",
+            dir.path().to_str().unwrap(),
+            "--format",
+            "tree",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("summary: symbols="))
+        .stdout(predicate::str::contains("[effect:persistence]"))
+        .stdout(predicate::str::contains("read ->"));
+}
+
+#[test]
 fn context_command_returns_symbol_info() {
     let dir = tempfile::tempdir().unwrap();
     let store_dir = dir.path().join(".grapha");

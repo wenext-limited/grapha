@@ -130,6 +130,20 @@ enum Commands {
         #[arg(long, value_enum, default_value_t = QueryOutputFormat::Json)]
         format: QueryOutputFormat,
     },
+    /// Derive a semantic effect graph from an entry point
+    Dataflow {
+        /// Entry point symbol name or ID
+        entry: String,
+        /// Maximum traversal depth
+        #[arg(long, default_value = "10")]
+        depth: usize,
+        /// Project directory
+        #[arg(short, long, default_value = ".")]
+        path: PathBuf,
+        /// Output format
+        #[arg(long, value_enum, default_value_t = QueryOutputFormat::Json)]
+        format: QueryOutputFormat,
+    },
     /// Reverse query: which entry points are affected by this symbol?
     Reverse {
         /// Symbol name or ID
@@ -614,6 +628,22 @@ fn main() -> anyhow::Result<()> {
             match format {
                 QueryOutputFormat::Json => println!("{}", serde_json::to_string_pretty(&result)?),
                 QueryOutputFormat::Tree => println!("{}", render::render_trace(&result)),
+            }
+        }
+        Commands::Dataflow {
+            entry,
+            depth,
+            path,
+            format,
+        } => {
+            let graph = load_graph(&path)?;
+            let result = resolve_query_result(
+                query::dataflow::query_dataflow(&graph, &entry, depth),
+                "entry point",
+            )?;
+            match format {
+                QueryOutputFormat::Json => println!("{}", serde_json::to_string_pretty(&result)?),
+                QueryOutputFormat::Tree => println!("{}", render::render_dataflow(&result)),
             }
         }
         Commands::Reverse {

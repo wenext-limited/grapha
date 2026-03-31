@@ -3,9 +3,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use grapha_core::graph::NodeKind;
 
 use crate::query::{
-    ContextResult, SymbolInfo, SymbolRef, SymbolTreeRef, entries::EntriesResult,
-    impact::ImpactResult, impact::ImpactTreeNode, reverse::AffectedEntry, reverse::ReverseResult,
-    trace::Flow, trace::TraceResult,
+    ContextResult, SymbolInfo, SymbolRef, SymbolTreeRef, dataflow::DataflowEdge,
+    dataflow::DataflowEdgeKind, dataflow::DataflowNode, dataflow::DataflowNodeKind,
+    dataflow::DataflowResult, entries::EntriesResult, impact::ImpactResult, impact::ImpactTreeNode,
+    reverse::AffectedEntry, reverse::ReverseResult, trace::Flow, trace::TraceResult,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -273,6 +274,142 @@ pub fn render_trace(result: &TraceResult) -> String {
             TreeNode::branch(
                 format!("flows ({})", result.summary.total_flows),
                 flows.into_tree_children(),
+            ),
+        ],
+    );
+
+    render_tree(&root)
+}
+
+fn dataflow_edge_kind_label(kind: DataflowEdgeKind) -> &'static str {
+    match kind {
+        DataflowEdgeKind::Call => "call",
+        DataflowEdgeKind::Read => "read",
+        DataflowEdgeKind::Write => "write",
+        DataflowEdgeKind::Publish => "publish",
+        DataflowEdgeKind::Subscribe => "subscribe",
+    }
+}
+
+fn dataflow_node_label(node: &DataflowNode) -> String {
+    match node.kind {
+        DataflowNodeKind::Entry => format!(
+            "{} [entry] ({})",
+            node.name,
+            node.file.as_deref().unwrap_or("unknown")
+        ),
+        DataflowNodeKind::Symbol => format!(
+            "{} [symbol] ({})",
+            node.name,
+            node.file.as_deref().unwrap_or("unknown")
+        ),
+        DataflowNodeKind::Effect => format!(
+            "{} [effect:{}]",
+            node.name,
+            node.effect_kind.as_deref().unwrap_or("unknown")
+        ),
+    }
+}
+
+fn dataflow_edge_label(edge: &DataflowEdge, target: &DataflowNode) -> String {
+    format!(
+        "{} -> {}",
+        dataflow_edge_kind_label(edge.kind),
+        dataflow_node_label(target)
+    )
+}
+
+fn render_dataflow_children(
+    current: &str,
+    adjacency: &BTreeMap<String, Vec<DataflowEdge>>,
+    node_index: &BTreeMap<String, DataflowNode>,
+    visited: &mut BTreeSet<String>,
+) -> Vec<TreeNode> {
+    let mut children = Vec::new();
+    let mut edges = adjacency.get(current).cloned().unwrap_or_default();
+    edges.sort_by(|left, right| {
+        left.kind
+            .cmp(&right.kind)
+            .then_with(|| left.target.cmp(&right.target))
+            .then_with(|| left.operation.cmp(&right.operation))
+    });
+
+    for edge in edges {
+        let Some(target) = node_index.get(&edge.target) else {
+            continue;
+        };
+        let mut edge_children = Vec::new();
+        if let Some(operation) = edge.operation.as_deref() {
+            edge_children.push(TreeNode::leaf(format!("operation: {operation}")));
+        }
+        for condition in &edge.conditions {
+            edge_children.push(TreeNode::leaf(format!("condition: {condition}")));
+        }
+        if edge.async_boundary == Some(true) {
+            edge_children.push(TreeNode::leaf("async_boundary: true"));
+        }
+        if !edge.provenance.is_empty() {
+            edge_children.push(TreeNode::leaf(format!(
+                "provenance: {}",
+                edge.provenance.len()
+            )));
+        }
+
+        if target.kind != DataflowNodeKind::Effect {
+            if visited.insert(target.id.clone()) {
+                edge_children.extend(render_dataflow_children(
+                    &target.id, adjacency, node_index, visited,
+                ));
+                visited.remove(&target.id);
+            } else {
+                edge_children.push(TreeNode::leaf("cycle"));
+            }
+        }
+
+        children.push(TreeNode::branch(
+            dataflow_edge_label(&edge, target),
+            edge_children,
+        ));
+    }
+
+    children
+}
+
+pub fn render_dataflow(result: &DataflowResult) -> String {
+    let node_index: BTreeMap<String, DataflowNode> = result
+        .nodes
+        .iter()
+        .cloned()
+        .map(|node| (node.id.clone(), node))
+        .collect();
+    let mut adjacency: BTreeMap<String, Vec<DataflowEdge>> = BTreeMap::new();
+    for edge in &result.edges {
+        adjacency
+            .entry(edge.source.clone())
+            .or_default()
+            .push(edge.clone());
+    }
+
+    let mut visited = BTreeSet::new();
+    visited.insert(result.entry.clone());
+
+    let root = TreeNode::branch(
+        format_symbol_ref(&result.entry_ref),
+        vec![
+            TreeNode::leaf(format!(
+                "summary: symbols={}, effects={}, edges={}, calls={}, reads={}, writes={}, publishes={}, subscribes={}",
+                result.summary.symbols,
+                result.summary.effects,
+                result.summary.edges,
+                result.summary.calls,
+                result.summary.reads,
+                result.summary.writes,
+                result.summary.publishes,
+                result.summary.subscribes,
+            )),
+            TreeNode::branch(
+                "graph",
+                render_dataflow_children(&result.entry, &adjacency, &node_index, &mut visited),
             ),
         ],
     );

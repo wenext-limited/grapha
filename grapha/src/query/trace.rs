@@ -40,7 +40,7 @@ pub struct TraceSummary {
     pub async_crossings: usize,
 }
 
-fn is_dataflow_edge(kind: EdgeKind) -> bool {
+pub(crate) fn is_dataflow_edge(kind: EdgeKind) -> bool {
     matches!(
         kind,
         EdgeKind::Calls
@@ -51,7 +51,7 @@ fn is_dataflow_edge(kind: EdgeKind) -> bool {
     )
 }
 
-fn terminal_kind_to_string(kind: &TerminalKind) -> String {
+pub(crate) fn terminal_kind_to_string(kind: &TerminalKind) -> String {
     match kind {
         TerminalKind::Network => "network".to_string(),
         TerminalKind::Persistence => "persistence".to_string(),
