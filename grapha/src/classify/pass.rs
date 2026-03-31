@@ -24,7 +24,10 @@ fn classify_by_module(target_usr: &str) -> Option<(TerminalKind, FlowDirection, 
     match module {
         // Network
         "FrameNetwork" | "FrameNetworkCore" | "Moya" | "Alamofire" => {
-            let dir = if target_usr.contains("request") || target_usr.contains("fetch") || target_usr.contains("get") {
+            let dir = if target_usr.contains("request")
+                || target_usr.contains("fetch")
+                || target_usr.contains("get")
+            {
                 FlowDirection::ReadWrite
             } else {
                 FlowDirection::ReadWrite
@@ -32,33 +35,54 @@ fn classify_by_module(target_usr: &str) -> Option<(TerminalKind, FlowDirection, 
             Some((TerminalKind::Network, dir, "request".to_string()))
         }
         // Persistence — database
-        "FrameStorage" | "FrameStorageCore" | "FrameStorageDatabase" | "GRDB" | "CoreData" | "RealmSwift" => {
-            Some((TerminalKind::Persistence, FlowDirection::ReadWrite, "db".to_string()))
-        }
+        "FrameStorage"
+        | "FrameStorageCore"
+        | "FrameStorageDatabase"
+        | "GRDB"
+        | "CoreData"
+        | "RealmSwift" => Some((
+            TerminalKind::Persistence,
+            FlowDirection::ReadWrite,
+            "db".to_string(),
+        )),
         // Persistence — file/download
-        "FrameDownload" | "Tiercel" => {
-            Some((TerminalKind::Persistence, FlowDirection::Write, "download".to_string()))
-        }
+        "FrameDownload" | "Tiercel" => Some((
+            TerminalKind::Persistence,
+            FlowDirection::Write,
+            "download".to_string(),
+        )),
         // Cache / resources
         "FrameResources" | "AppResource" | "Kingfisher" | "SDWebImageSwiftUI" | "FrameImage" => {
-            Some((TerminalKind::Cache, FlowDirection::Read, "resource".to_string()))
+            Some((
+                TerminalKind::Cache,
+                FlowDirection::Read,
+                "resource".to_string(),
+            ))
         }
         // Events / WebSocket
-        "FrameWebView" | "WEKit" => {
-            Some((TerminalKind::Event, FlowDirection::ReadWrite, "webview".to_string()))
-        }
+        "FrameWebView" | "WEKit" => Some((
+            TerminalKind::Event,
+            FlowDirection::ReadWrite,
+            "webview".to_string(),
+        )),
         // Statistics / analytics
-        "FrameStat" => {
-            Some((TerminalKind::Event, FlowDirection::Write, "stat".to_string()))
-        }
+        "FrameStat" => Some((
+            TerminalKind::Event,
+            FlowDirection::Write,
+            "stat".to_string(),
+        )),
         // Media
-        "FrameMedia" | "FrameMediaShared" => {
-            Some((TerminalKind::Cache, FlowDirection::ReadWrite, "media".to_string()))
-        }
+        "FrameMedia" | "FrameMediaShared" => Some((
+            TerminalKind::Cache,
+            FlowDirection::ReadWrite,
+            "media".to_string(),
+        )),
         // Router
-        "FrameRouter" => {
-            Some((TerminalKind::Event, FlowDirection::Write, "navigate".to_string()))
-        }
+        "FrameRouter" => Some((
+            TerminalKind::Event,
+            FlowDirection::Write,
+            "navigate".to_string(),
+        )),
         _ => None,
     }
 }
@@ -127,9 +151,9 @@ pub fn classify_graph(graph: &Graph, classifier: &CompositeClassifier) -> Graph 
     // Detect entry points from protocol conformances (works for index store USR-based data)
     // SwiftUI View body, App body, Observable/ObservableObject public methods
     let entry_patterns: &[&str] = &[
-        "SwiftUI",          // SwiftUI.View, SwiftUI.App conformances
+        "SwiftUI",           // SwiftUI.View, SwiftUI.App conformances
         "ObservableObjectP", // Combine.ObservableObject
-        "10ObservableP",    // Observation.Observable (@Observable)
+        "10ObservableP",     // Observation.Observable (@Observable)
     ];
 
     for edge in &graph.edges {

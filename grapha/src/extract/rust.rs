@@ -1074,21 +1074,30 @@ mod tests {
         let result = extract("use std::collections::HashMap;");
         assert_eq!(result.imports.len(), 1);
         assert_eq!(result.imports[0].path, "std::collections::HashMap");
-        assert_eq!(result.imports[0].kind, grapha_core::resolve::ImportKind::Named);
+        assert_eq!(
+            result.imports[0].kind,
+            grapha_core::resolve::ImportKind::Named
+        );
     }
 
     #[test]
     fn extracts_relative_imports() {
         let result = extract("use crate::graph::Node;");
         assert_eq!(result.imports.len(), 1);
-        assert_eq!(result.imports[0].kind, grapha_core::resolve::ImportKind::Relative);
+        assert_eq!(
+            result.imports[0].kind,
+            grapha_core::resolve::ImportKind::Relative
+        );
     }
 
     #[test]
     fn extracts_glob_imports() {
         let result = extract("use std::collections::*;");
         assert_eq!(result.imports.len(), 1);
-        assert_eq!(result.imports[0].kind, grapha_core::resolve::ImportKind::Wildcard);
+        assert_eq!(
+            result.imports[0].kind,
+            grapha_core::resolve::ImportKind::Wildcard
+        );
     }
 
     #[test]

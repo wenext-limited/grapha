@@ -2,8 +2,8 @@ use std::path::PathBuf;
 
 use rusqlite::Connection;
 
-use grapha_core::graph::{Edge, EdgeKind, Graph, Node, NodeKind, NodeRole, Span, Visibility};
 use crate::store::Store;
+use grapha_core::graph::{Edge, EdgeKind, Graph, Node, NodeKind, NodeRole, Span, Visibility};
 
 pub struct SqliteStore {
     path: PathBuf,

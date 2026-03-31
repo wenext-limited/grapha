@@ -118,8 +118,8 @@ pub fn extract_swift(
     if let Some(root) = project_root {
         init_index_store(root);
     }
-    let effective_store = index_store_path
-        .or_else(|| INDEX_STORE_PATH.get().and_then(|p| p.as_deref()));
+    let effective_store =
+        index_store_path.or_else(|| INDEX_STORE_PATH.get().and_then(|p| p.as_deref()));
 
     if let Some(store_path) = effective_store {
         // Index store needs absolute file path for matching

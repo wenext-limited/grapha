@@ -76,18 +76,22 @@ pub fn merge(results: Vec<ExtractionResult>) -> Graph {
         .collect();
 
     // Build child_id → parent type names from Contains edges for hint-based disambiguation.
-    let id_to_name: HashMap<&str, &str> =
-        graph.nodes.iter().map(|n| (n.id.as_str(), n.name.as_str())).collect();
+    let id_to_name: HashMap<&str, &str> = graph
+        .nodes
+        .iter()
+        .map(|n| (n.id.as_str(), n.name.as_str()))
+        .collect();
     let mut child_to_parent_names: HashMap<String, Vec<String>> = HashMap::new();
     for r in &results {
         for edge in &r.edges {
             if edge.kind == EdgeKind::Contains
-                && let Some(parent_name) = id_to_name.get(edge.source.as_str()) {
-                    child_to_parent_names
-                        .entry(edge.target.clone())
-                        .or_default()
-                        .push(parent_name.to_string());
-                }
+                && let Some(parent_name) = id_to_name.get(edge.source.as_str())
+            {
+                child_to_parent_names
+                    .entry(edge.target.clone())
+                    .or_default()
+                    .push(parent_name.to_string());
+            }
         }
     }
 
@@ -123,8 +127,7 @@ pub fn merge(results: Vec<ExtractionResult>) -> Graph {
 
                 if candidates.len() == 1 {
                     let candidate = &candidates[0];
-                    let same_module =
-                        modules_match(source_module, candidate.module.as_deref());
+                    let same_module = modules_match(source_module, candidate.module.as_deref());
                     if same_module {
                         edge.target = candidate.id.clone();
                         edge.confidence *= 0.9;
@@ -190,11 +193,11 @@ fn resolve_candidates(
             let narrowed: Vec<&&NameEntry> = same_module
                 .iter()
                 .filter(|c| {
-                    child_to_parent_names
-                        .get(&c.id)
-                        .is_some_and(|parents| {
-                            parents.iter().any(|p| p.to_lowercase().contains(&hint_name))
-                        })
+                    child_to_parent_names.get(&c.id).is_some_and(|parents| {
+                        parents
+                            .iter()
+                            .any(|p| p.to_lowercase().contains(&hint_name))
+                    })
                 })
                 .collect();
             if narrowed.len() == 1 {
@@ -203,30 +206,20 @@ fn resolve_candidates(
         }
 
         // Fallback: keep all same-module candidates with low confidence
-        return same_module
-            .iter()
-            .map(|c| (c.id.clone(), 0.4))
-            .collect();
+        return same_module.iter().map(|c| (c.id.clone(), 0.4)).collect();
     }
 
     // 2. Imported-module candidates
     if let Some(imports) = source_imports {
         let imported: Vec<&NameEntry> = candidates
             .iter()
-            .filter(|c| {
-                c.module
-                    .as_deref()
-                    .is_some_and(|m| imports.contains(m))
-            })
+            .filter(|c| c.module.as_deref().is_some_and(|m| imports.contains(m)))
             .collect();
         if imported.len() == 1 {
             return vec![(imported[0].id.clone(), 0.8)];
         }
         if imported.len() > 1 {
-            return imported
-                .iter()
-                .map(|c| (c.id.clone(), 0.3))
-                .collect();
+            return imported.iter().map(|c| (c.id.clone(), 0.3)).collect();
         }
     }
 

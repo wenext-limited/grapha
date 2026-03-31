@@ -6,10 +6,7 @@ use grapha_core::ExtractionResult;
 use crate::bridge;
 
 /// Try to extract Swift symbols using SwiftSyntax via the bridge.
-pub fn extract_with_swiftsyntax(
-    source: &[u8],
-    file_path: &Path,
-) -> Option<ExtractionResult> {
+pub fn extract_with_swiftsyntax(source: &[u8], file_path: &Path) -> Option<ExtractionResult> {
     let bridge = bridge::bridge()?;
 
     let file_path_c = CString::new(file_path.to_str()?).ok()?;

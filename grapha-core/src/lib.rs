@@ -1,7 +1,7 @@
+pub mod extract;
 pub mod graph;
 pub mod resolve;
-pub mod extract;
 
+pub use extract::{ExtractionResult, LanguageExtractor};
 pub use graph::*;
 pub use resolve::*;
-pub use extract::{ExtractionResult, LanguageExtractor};

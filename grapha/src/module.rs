@@ -64,15 +64,17 @@ impl ModuleMap {
                 // Fallback: suffix-based matching for relative paths.
                 // Check if the relative file path is a suffix of the module dir
                 // or if the module dir name appears as a component of the file path.
-                if best_match.is_none() && file.is_relative()
-                    && let Some(dir_name) = canonical_dir.file_name().and_then(|n| n.to_str()) {
-                        let file_str = file.to_string_lossy();
-                        if file_str.starts_with(dir_name)
-                            || file_str.starts_with(&format!("{dir_name}/"))
-                        {
-                            best_match = Some((name, usize::MAX));
-                        }
+                if best_match.is_none()
+                    && file.is_relative()
+                    && let Some(dir_name) = canonical_dir.file_name().and_then(|n| n.to_str())
+                {
+                    let file_str = file.to_string_lossy();
+                    if file_str.starts_with(dir_name)
+                        || file_str.starts_with(&format!("{dir_name}/"))
+                    {
+                        best_match = Some((name, usize::MAX));
                     }
+                }
             }
         }
 

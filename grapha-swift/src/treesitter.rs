@@ -678,8 +678,13 @@ fn extract_function(
         for child in node.named_children(&mut c) {
             if !matches!(
                 child.kind(),
-                "modifiers" | "parameter" | "type_annotation" | "attribute" | "where_clause"
-                    | "simple_identifier" | "type_identifier"
+                "modifiers"
+                    | "parameter"
+                    | "type_annotation"
+                    | "attribute"
+                    | "where_clause"
+                    | "simple_identifier"
+                    | "type_identifier"
             ) {
                 extract_calls(child, source, file, module_path, &id, result);
             }
@@ -725,11 +730,16 @@ fn extract_property(
     // text for function call patterns using regex. This handles cases where
     // tree-sitter-swift doesn't produce call_expression nodes (e.g., SwiftUI
     // View body with result builders).
-    let calls_before = result.edges.iter().filter(|e| e.source == id && e.kind == EdgeKind::Calls).count();
+    let calls_before = result
+        .edges
+        .iter()
+        .filter(|e| e.source == id && e.kind == EdgeKind::Calls)
+        .count();
     if calls_before == 0
-        && let Ok(text) = node.utf8_text(source) {
-            extract_calls_from_text(text, file, module_path, &id, result);
-        }
+        && let Ok(text) = node.utf8_text(source)
+    {
+        extract_calls_from_text(text, file, module_path, &id, result);
+    }
 }
 
 /// Extract function calls from raw source text using regex.
@@ -746,9 +756,11 @@ fn extract_calls_from_text(
     // But skip common keywords and type annotations
     let call_re = regex::Regex::new(r"(?:^|[.\s({,])([a-z][a-zA-Z0-9]*)\s*\(").unwrap();
     let skip_names: std::collections::HashSet<&str> = [
-        "if", "for", "while", "switch", "guard", "return", "let", "var", "case",
-        "some", "in", "as", "is", "try", "await", "throw", "catch", "where",
-    ].into_iter().collect();
+        "if", "for", "while", "switch", "guard", "return", "let", "var", "case", "some", "in",
+        "as", "is", "try", "await", "throw", "catch", "where",
+    ]
+    .into_iter()
+    .collect();
 
     let mut seen = std::collections::HashSet::new();
     for cap in call_re.captures_iter(text) {
@@ -1130,25 +1142,25 @@ fn extract_calls(
             .filter(|c| c.kind() == "navigation_suffix")
             .last()
             && let Some(name_node) = suffix.named_child(0)
-                && let Ok(prop_name) = name_node.utf8_text(source)
-                && !prop_name.is_empty()
-            {
-                let target_id = make_id(file, module_path, prop_name);
-                let condition = find_enclosing_swift_condition(node, source);
-                // Extract the prefix chain (e.g., "AppContext.gift" from "AppContext.gift.activityGiftConfigs")
-                // to help the merge step disambiguate among multiple candidates.
-                let prefix = extract_nav_prefix(node, source);
-                result.edges.push(Edge {
-                    source: caller_id.to_string(),
-                    target: target_id,
-                    kind: EdgeKind::Calls,
-                    confidence: 0.6,
-                    direction: None,
-                    operation: prefix,
-                    condition,
-                    async_boundary: None,
-                });
-            }
+            && let Ok(prop_name) = name_node.utf8_text(source)
+            && !prop_name.is_empty()
+        {
+            let target_id = make_id(file, module_path, prop_name);
+            let condition = find_enclosing_swift_condition(node, source);
+            // Extract the prefix chain (e.g., "AppContext.gift" from "AppContext.gift.activityGiftConfigs")
+            // to help the merge step disambiguate among multiple candidates.
+            let prefix = extract_nav_prefix(node, source);
+            result.edges.push(Edge {
+                source: caller_id.to_string(),
+                target: target_id,
+                kind: EdgeKind::Calls,
+                confidence: 0.6,
+                direction: None,
+                operation: prefix,
+                condition,
+                async_boundary: None,
+            });
+        }
     }
 
     // Recurse into all children
@@ -1272,7 +1284,10 @@ mod tests {
         let result = extract("import Foundation");
         assert_eq!(result.imports.len(), 1);
         assert_eq!(result.imports[0].path, "Foundation");
-        assert_eq!(result.imports[0].kind, grapha_core::resolve::ImportKind::Module);
+        assert_eq!(
+            result.imports[0].kind,
+            grapha_core::resolve::ImportKind::Module
+        );
     }
 
     #[test]

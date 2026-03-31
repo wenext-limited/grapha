@@ -27,13 +27,18 @@ impl SwiftBridge {
         let lib = unsafe { Library::new(&lib_path) }.ok()?;
 
         unsafe {
-            let indexstore_open = *lib.get::<IndexStoreOpenFn>(b"grapha_indexstore_open").ok()?;
-            let indexstore_extract =
-                *lib.get::<IndexStoreExtractFn>(b"grapha_indexstore_extract").ok()?;
-            let indexstore_close =
-                *lib.get::<IndexStoreCloseFn>(b"grapha_indexstore_close").ok()?;
-            let swiftsyntax_extract =
-                *lib.get::<SwiftSyntaxExtractFn>(b"grapha_swiftsyntax_extract").ok()?;
+            let indexstore_open = *lib
+                .get::<IndexStoreOpenFn>(b"grapha_indexstore_open")
+                .ok()?;
+            let indexstore_extract = *lib
+                .get::<IndexStoreExtractFn>(b"grapha_indexstore_extract")
+                .ok()?;
+            let indexstore_close = *lib
+                .get::<IndexStoreCloseFn>(b"grapha_indexstore_close")
+                .ok()?;
+            let swiftsyntax_extract = *lib
+                .get::<SwiftSyntaxExtractFn>(b"grapha_swiftsyntax_extract")
+                .ok()?;
             let free_string = *lib.get::<FreeStringFn>(b"grapha_free_string").ok()?;
 
             Some(SwiftBridge {
