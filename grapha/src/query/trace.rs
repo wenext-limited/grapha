@@ -4,6 +4,8 @@ use serde::Serialize;
 
 use grapha_core::graph::{EdgeKind, FlowDirection, Graph, NodeRole, TerminalKind};
 
+use super::QueryResolveError;
+
 #[derive(Debug, Serialize)]
 pub struct TraceResult {
     pub entry: String,
@@ -72,11 +74,12 @@ fn direction_from_edge(edge_kind: EdgeKind, direction: Option<&FlowDirection>) -
     }
 }
 
-pub fn query_trace(graph: &Graph, entry: &str, max_depth: usize) -> Option<TraceResult> {
-    let entry_node = graph
-        .nodes
-        .iter()
-        .find(|n| n.id == entry || n.name == entry)?;
+pub fn query_trace(
+    graph: &Graph,
+    entry: &str,
+    max_depth: usize,
+) -> Result<TraceResult, QueryResolveError> {
+    let entry_node = crate::query::resolve_node(&graph.nodes, entry)?;
 
     let node_index: HashMap<&str, usize> = graph
         .nodes
@@ -222,7 +225,7 @@ pub fn query_trace(graph: &Graph, entry: &str, max_depth: usize) -> Option<Trace
         async_crossings: total_async_crossings,
     };
 
-    Some(TraceResult {
+    Ok(TraceResult {
         entry: entry_node.id.clone(),
         flows,
         summary,
@@ -340,7 +343,10 @@ mod tests {
             nodes: vec![make_node("a", None)],
             edges: vec![],
         };
-        assert!(query_trace(&graph, "nonexistent", 10).is_none());
+        assert!(matches!(
+            query_trace(&graph, "nonexistent", 10),
+            Err(QueryResolveError::NotFound { .. })
+        ));
     }
 
     #[test]

@@ -2,9 +2,9 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use serde::Serialize;
 
-use grapha_core::graph::{EdgeKind, Graph, NodeRole};
+use grapha_core::graph::{EdgeKind, Graph, Node, NodeKind, NodeRole};
 
-use super::SymbolRef;
+use super::{QueryResolveError, SymbolRef, normalize_symbol_name, strip_accessor_prefix};
 
 #[derive(Debug, Serialize)]
 pub struct ReverseResult {
@@ -21,6 +21,12 @@ pub struct AffectedEntry {
     pub path: Vec<String>,
 }
 
+#[derive(Debug)]
+struct AccessorCluster<'a> {
+    display_name: String,
+    entry_nodes: Vec<&'a Node>,
+}
+
 fn is_dataflow_edge(kind: EdgeKind) -> bool {
     matches!(
         kind,
@@ -32,77 +38,263 @@ fn is_dataflow_edge(kind: EdgeKind) -> bool {
     )
 }
 
-pub fn query_reverse(graph: &Graph, symbol: &str) -> Option<ReverseResult> {
-    let target_node = graph
-        .nodes
+fn is_accessor_function(node: &Node) -> bool {
+    node.kind == NodeKind::Function && strip_accessor_prefix(&node.name) != node.name
+}
+
+fn accessor_property_pair<'a>(left: &'a Node, right: &'a Node) -> Option<(&'a Node, &'a Node)> {
+    if is_accessor_function(left)
+        && right.kind == NodeKind::Property
+        && normalize_symbol_name(&left.name) == normalize_symbol_name(&right.name)
+    {
+        Some((left, right))
+    } else if is_accessor_function(right)
+        && left.kind == NodeKind::Property
+        && normalize_symbol_name(&right.name) == normalize_symbol_name(&left.name)
+    {
+        Some((right, left))
+    } else {
+        None
+    }
+}
+
+fn node_kind_preference(kind: NodeKind) -> usize {
+    match kind {
+        NodeKind::Property => 0,
+        NodeKind::Function => 1,
+        NodeKind::Variant | NodeKind::Field => 2,
+        _ => 3,
+    }
+}
+
+fn canonical_cluster_name(cluster_nodes: &[&Node]) -> String {
+    if let Some(property_node) = cluster_nodes
         .iter()
-        .find(|n| n.id == symbol || n.name == symbol)?;
-
-    let node_index: HashMap<&str, &grapha_core::graph::Node> =
-        graph.nodes.iter().map(|n| (n.id.as_str(), n)).collect();
-
-    // Build reverse adjacency: target -> [source_id]
-    let mut reverse_adj: HashMap<&str, Vec<&str>> = HashMap::new();
-    for edge in &graph.edges {
-        if is_dataflow_edge(edge.kind) {
-            reverse_adj
-                .entry(&edge.target)
-                .or_default()
-                .push(&edge.source);
-        }
+        .find(|node| node.kind == NodeKind::Property)
+    {
+        return normalize_symbol_name(&property_node.name).to_string();
     }
 
-    let mut visited: HashSet<&str> = HashSet::new();
-    visited.insert(&target_node.id);
+    let preferred = cluster_nodes
+        .iter()
+        .min_by_key(|node| {
+            (
+                node_kind_preference(node.kind),
+                normalize_symbol_name(&node.name),
+                node.id.as_str(),
+            )
+        })
+        .expect("cluster_nodes is not empty");
 
-    // BFS backward: (node_id, distance, path_from_target)
-    let mut queue: VecDeque<(&str, usize, Vec<String>)> = VecDeque::new();
-    queue.push_back((&target_node.id, 0, vec![target_node.name.clone()]));
+    normalize_symbol_name(&preferred.name).to_string()
+}
 
-    let mut affected_entries = Vec::new();
+fn to_symbol_ref(node: &Node) -> SymbolRef {
+    SymbolRef {
+        id: node.id.clone(),
+        name: node.name.clone(),
+        kind: node.kind,
+        file: node.file.to_string_lossy().to_string(),
+    }
+}
 
-    while let Some((current, distance, path)) = queue.pop_front() {
-        if let Some(sources) = reverse_adj.get(current) {
-            for &source_id in sources {
-                if visited.contains(source_id) {
-                    continue;
-                }
-                visited.insert(source_id);
+fn build_accessor_adjacency<'a>(
+    graph: &'a Graph,
+    node_index: &HashMap<&'a str, &'a Node>,
+) -> HashMap<&'a str, Vec<&'a str>> {
+    let mut adjacency: HashMap<&str, Vec<&str>> = HashMap::new();
 
-                if let Some(source_node) = node_index.get(source_id) {
-                    let mut new_path = path.clone();
-                    new_path.push(source_node.name.clone());
-                    let new_distance = distance + 1;
+    for edge in &graph.edges {
+        if edge.kind != EdgeKind::Implements {
+            continue;
+        }
 
-                    if source_node.role == Some(NodeRole::EntryPoint) {
-                        // Reverse the path so it goes entry -> ... -> symbol
-                        let reversed_path: Vec<String> = new_path.into_iter().rev().collect();
-                        affected_entries.push(AffectedEntry {
-                            entry: SymbolRef {
-                                id: source_node.id.clone(),
-                                name: source_node.name.clone(),
-                                kind: source_node.kind,
-                                file: source_node.file.to_string_lossy().to_string(),
-                            },
-                            distance: new_distance,
-                            path: reversed_path.clone(),
-                        });
-                        // Continue BFS past entry points
-                        queue.push_back((
-                            source_id,
-                            new_distance,
-                            reversed_path.into_iter().rev().collect(),
-                        ));
-                    } else {
-                        queue.push_back((source_id, new_distance, new_path));
+        let Some(source_node) = node_index.get(edge.source.as_str()).copied() else {
+            continue;
+        };
+        let Some(target_node) = node_index.get(edge.target.as_str()).copied() else {
+            continue;
+        };
+        let Some((accessor, property)) = accessor_property_pair(source_node, target_node) else {
+            continue;
+        };
+
+        adjacency
+            .entry(accessor.id.as_str())
+            .or_default()
+            .push(property.id.as_str());
+        adjacency
+            .entry(property.id.as_str())
+            .or_default()
+            .push(accessor.id.as_str());
+    }
+
+    adjacency
+}
+
+fn build_accessor_clusters<'a>(
+    graph: &'a Graph,
+    node_index: &HashMap<&'a str, &'a Node>,
+    accessor_adjacency: &HashMap<&'a str, Vec<&'a str>>,
+) -> (
+    HashMap<&'a str, AccessorCluster<'a>>,
+    HashMap<&'a str, &'a str>,
+) {
+    let mut clusters = HashMap::new();
+    let mut node_to_cluster = HashMap::new();
+    let mut visited = HashSet::new();
+
+    for node in &graph.nodes {
+        let start_id = node.id.as_str();
+        if !visited.insert(start_id) {
+            continue;
+        }
+
+        let mut stack = vec![start_id];
+        let mut members = Vec::new();
+
+        while let Some(current_id) = stack.pop() {
+            members.push(current_id);
+            if let Some(neighbors) = accessor_adjacency.get(current_id) {
+                for &neighbor_id in neighbors {
+                    if visited.insert(neighbor_id) {
+                        stack.push(neighbor_id);
                     }
                 }
+            }
+        }
+
+        members.sort_unstable();
+        let cluster_id = members[0];
+        let cluster_nodes: Vec<&Node> = members
+            .iter()
+            .filter_map(|member_id| node_index.get(member_id).copied())
+            .collect();
+        let display_name = canonical_cluster_name(&cluster_nodes);
+        let entry_nodes = cluster_nodes
+            .iter()
+            .copied()
+            .filter(|cluster_node| cluster_node.role == Some(NodeRole::EntryPoint))
+            .collect();
+
+        for &member_id in &members {
+            node_to_cluster.insert(member_id, cluster_id);
+        }
+
+        clusters.insert(
+            cluster_id,
+            AccessorCluster {
+                display_name,
+                entry_nodes,
+            },
+        );
+    }
+
+    (clusters, node_to_cluster)
+}
+
+fn build_reverse_cluster_adjacency<'a>(
+    graph: &'a Graph,
+    node_to_cluster: &HashMap<&'a str, &'a str>,
+) -> HashMap<&'a str, Vec<&'a str>> {
+    let mut reverse_adjacency: HashMap<&str, HashSet<&str>> = HashMap::new();
+
+    for edge in &graph.edges {
+        if !is_dataflow_edge(edge.kind) {
+            continue;
+        }
+
+        let Some(&source_cluster) = node_to_cluster.get(edge.source.as_str()) else {
+            continue;
+        };
+        let Some(&target_cluster) = node_to_cluster.get(edge.target.as_str()) else {
+            continue;
+        };
+
+        if source_cluster == target_cluster {
+            continue;
+        }
+
+        reverse_adjacency
+            .entry(target_cluster)
+            .or_default()
+            .insert(source_cluster);
+    }
+
+    reverse_adjacency
+        .into_iter()
+        .map(|(cluster_id, cluster_sources)| {
+            let mut sources: Vec<_> = cluster_sources.into_iter().collect();
+            sources.sort_unstable();
+            (cluster_id, sources)
+        })
+        .collect()
+}
+
+pub fn query_reverse(graph: &Graph, symbol: &str) -> Result<ReverseResult, QueryResolveError> {
+    let target_node = crate::query::resolve_node(&graph.nodes, symbol)?;
+
+    let node_index: HashMap<&str, &Node> = graph.nodes.iter().map(|n| (n.id.as_str(), n)).collect();
+    let accessor_adjacency = build_accessor_adjacency(graph, &node_index);
+    let (clusters, node_to_cluster) =
+        build_accessor_clusters(graph, &node_index, &accessor_adjacency);
+    let reverse_adjacency = build_reverse_cluster_adjacency(graph, &node_to_cluster);
+
+    let target_cluster_id = *node_to_cluster
+        .get(target_node.id.as_str())
+        .expect("resolved node must belong to a cluster");
+    let target_cluster = clusters
+        .get(target_cluster_id)
+        .expect("target cluster must exist");
+
+    let mut visited_clusters: HashSet<&str> = HashSet::new();
+    visited_clusters.insert(target_cluster_id);
+
+    // BFS backward over transparent accessor clusters:
+    // (cluster_id, dataflow_distance, path_from_target)
+    let mut queue: VecDeque<(&str, usize, Vec<String>)> = VecDeque::new();
+    queue.push_back((
+        target_cluster_id,
+        0,
+        vec![target_cluster.display_name.clone()],
+    ));
+
+    let mut affected_entries = Vec::new();
+    let mut seen_entries: HashSet<&str> = HashSet::new();
+
+    while let Some((cluster_id, distance, path)) = queue.pop_front() {
+        let cluster = clusters.get(cluster_id).expect("cluster must exist");
+
+        for entry_node in &cluster.entry_nodes {
+            if seen_entries.insert(entry_node.id.as_str()) {
+                let reversed_path: Vec<String> = path.iter().rev().cloned().collect();
+                affected_entries.push(AffectedEntry {
+                    entry: to_symbol_ref(entry_node),
+                    distance,
+                    path: reversed_path,
+                });
+            }
+        }
+
+        if let Some(source_clusters) = reverse_adjacency.get(cluster_id) {
+            for &source_cluster_id in source_clusters {
+                if visited_clusters.contains(source_cluster_id) {
+                    continue;
+                }
+                visited_clusters.insert(source_cluster_id);
+
+                let source_cluster = clusters
+                    .get(source_cluster_id)
+                    .expect("source cluster must exist");
+                let mut new_path = path.clone();
+                new_path.push(source_cluster.display_name.clone());
+                queue.push_back((source_cluster_id, distance + 1, new_path));
             }
         }
     }
 
     let total_entries = affected_entries.len();
-    Some(ReverseResult {
+    Ok(ReverseResult {
         symbol: target_node.id.clone(),
         affected_entries,
         total_entries,
@@ -116,11 +308,11 @@ mod tests {
     use std::collections::HashMap as StdHashMap;
     use std::path::PathBuf;
 
-    fn make_node(id: &str, role: Option<NodeRole>) -> Node {
+    fn make_node(id: &str, name: &str, kind: NodeKind, role: Option<NodeRole>) -> Node {
         Node {
             id: id.into(),
-            kind: NodeKind::Function,
-            name: id.into(),
+            kind,
+            name: name.into(),
             file: PathBuf::from("test.rs"),
             span: Span {
                 start: [0, 0],
@@ -153,10 +345,17 @@ mod tests {
         let graph = Graph {
             version: "0.1.0".to_string(),
             nodes: vec![
-                make_node("entry1", Some(NodeRole::EntryPoint)),
-                make_node("service", None),
+                make_node(
+                    "entry1",
+                    "entry1",
+                    NodeKind::Function,
+                    Some(NodeRole::EntryPoint),
+                ),
+                make_node("service", "service", NodeKind::Function, None),
                 make_node(
                     "db",
+                    "db",
+                    NodeKind::Function,
                     Some(NodeRole::Terminal {
                         kind: TerminalKind::Persistence,
                     }),
@@ -181,9 +380,19 @@ mod tests {
         let graph = Graph {
             version: "0.1.0".to_string(),
             nodes: vec![
-                make_node("entry1", Some(NodeRole::EntryPoint)),
-                make_node("entry2", Some(NodeRole::EntryPoint)),
-                make_node("shared", None),
+                make_node(
+                    "entry1",
+                    "entry1",
+                    NodeKind::Function,
+                    Some(NodeRole::EntryPoint),
+                ),
+                make_node(
+                    "entry2",
+                    "entry2",
+                    NodeKind::Function,
+                    Some(NodeRole::EntryPoint),
+                ),
+                make_node("shared", "shared", NodeKind::Function, None),
             ],
             edges: vec![make_edge("entry1", "shared"), make_edge("entry2", "shared")],
         };
@@ -203,10 +412,13 @@ mod tests {
     fn returns_none_for_unknown_symbol() {
         let graph = Graph {
             version: "0.1.0".to_string(),
-            nodes: vec![make_node("a", None)],
+            nodes: vec![make_node("a", "a", NodeKind::Function, None)],
             edges: vec![],
         };
-        assert!(query_reverse(&graph, "nonexistent").is_none());
+        assert!(matches!(
+            query_reverse(&graph, "nonexistent"),
+            Err(QueryResolveError::NotFound { .. })
+        ));
     }
 
     #[test]
@@ -214,9 +426,14 @@ mod tests {
         let graph = Graph {
             version: "0.1.0".to_string(),
             nodes: vec![
-                make_node("entry", Some(NodeRole::EntryPoint)),
-                make_node("mid", None),
-                make_node("target", None),
+                make_node(
+                    "entry",
+                    "entry",
+                    NodeKind::Function,
+                    Some(NodeRole::EntryPoint),
+                ),
+                make_node("mid", "mid", NodeKind::Function, None),
+                make_node("target", "target", NodeKind::Function, None),
             ],
             edges: vec![make_edge("entry", "mid"), make_edge("mid", "target")],
         };
@@ -226,6 +443,75 @@ mod tests {
         assert_eq!(
             result.affected_entries[0].path,
             vec!["entry", "mid", "target"]
+        );
+    }
+
+    #[test]
+    fn traverses_accessor_clusters_without_exposing_accessor_hops() {
+        let graph = Graph {
+            version: "0.1.0".to_string(),
+            nodes: vec![
+                make_node("getter:body", "getter:body", NodeKind::Function, None),
+                make_node(
+                    "body",
+                    "body",
+                    NodeKind::Property,
+                    Some(NodeRole::EntryPoint),
+                ),
+                make_node(
+                    "getter:viewModel",
+                    "getter:viewModel",
+                    NodeKind::Function,
+                    None,
+                ),
+                make_node("viewModel", "viewModel", NodeKind::Property, None),
+                make_node(
+                    "sendMessage",
+                    "sendMessage(message:)",
+                    NodeKind::Function,
+                    None,
+                ),
+                make_node(
+                    "handleSendResult",
+                    "handleSendResult(_:receiveValue:)",
+                    NodeKind::Function,
+                    None,
+                ),
+            ],
+            edges: vec![
+                Edge {
+                    source: "getter:body".into(),
+                    target: "body".into(),
+                    kind: EdgeKind::Implements,
+                    confidence: 1.0,
+                    direction: None,
+                    operation: None,
+                    condition: None,
+                    async_boundary: None,
+                },
+                Edge {
+                    source: "getter:viewModel".into(),
+                    target: "viewModel".into(),
+                    kind: EdgeKind::Implements,
+                    confidence: 1.0,
+                    direction: None,
+                    operation: None,
+                    condition: None,
+                    async_boundary: None,
+                },
+                make_edge("getter:body", "getter:viewModel"),
+                make_edge("getter:viewModel", "sendMessage"),
+                make_edge("sendMessage", "handleSendResult"),
+            ],
+        };
+
+        let result = query_reverse(&graph, "handleSendResult").unwrap();
+        assert_eq!(result.affected_entries.len(), 1);
+        assert_eq!(result.affected_entries[0].entry.id, "body");
+        assert_eq!(result.affected_entries[0].distance, 3);
+        assert_eq!(
+            result.affected_entries[0].path,
+            vec!["body", "viewModel", "sendMessage", "handleSendResult"]
         );
     }
 }

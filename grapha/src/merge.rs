@@ -95,7 +95,17 @@ pub fn merge(results: Vec<ExtractionResult>) -> Graph {
     let all_edges: Vec<_> = results.into_iter().flat_map(|r| r.edges).collect();
 
     for mut edge in all_edges {
-        if node_ids.contains(edge.target.as_str()) || edge.kind == EdgeKind::Uses {
+        // Keep edges that resolve to known nodes, or are Uses/Implements (external refs),
+        // or are USR-based calls to external frameworks (for terminal classification)
+        let is_external_usr_call = edge.target.starts_with("s:")
+            && edge.kind == EdgeKind::Calls
+            && !node_ids.contains(edge.target.as_str());
+
+        if node_ids.contains(edge.target.as_str())
+            || edge.kind == EdgeKind::Uses
+            || edge.kind == EdgeKind::Implements
+            || is_external_usr_call
+        {
             graph.edges.push(edge);
         } else {
             let target_name = edge.target.rsplit("::").next().unwrap_or(&edge.target);

@@ -17,7 +17,7 @@ mod store;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use anyhow::Context;
+use anyhow::{Context, anyhow};
 use clap::{Parser, Subcommand};
 
 use store::Store;
@@ -157,7 +157,6 @@ fn stamp_module(
     extract::ExtractionResult { nodes, ..result }
 }
 
-
 /// Run the extraction pipeline on a path, returning a merged graph.
 fn run_pipeline(path: &Path, verbose: bool) -> anyhow::Result<grapha_core::graph::Graph> {
     let t = Instant::now();
@@ -224,8 +223,7 @@ fn run_pipeline(path: &Path, verbose: bool) -> anyhow::Result<grapha_core::graph
                     .unwrap_or(file.as_path())
             };
 
-            let abs_file =
-                std::fs::canonicalize(file).unwrap_or_else(|_| abs_root.join(relative));
+            let abs_file = std::fs::canonicalize(file).unwrap_or_else(|_| abs_root.join(relative));
             let file_module = module_map.module_for_file(&abs_file).or_else(|| {
                 relative
                     .components()
@@ -235,9 +233,7 @@ fn run_pipeline(path: &Path, verbose: bool) -> anyhow::Result<grapha_core::graph
             });
 
             let extraction_result = match ext {
-                "swift" => {
-                    grapha_swift::extract_swift(&source, relative, None, Some(&abs_root))
-                }
+                "swift" => grapha_swift::extract_swift(&source, relative, None, Some(&abs_root)),
                 "rs" => {
                     let extractor = extract::rust::RustExtractor;
                     use grapha_core::LanguageExtractor;
@@ -257,10 +253,7 @@ fn run_pipeline(path: &Path, verbose: bool) -> anyhow::Result<grapha_core::graph
                     if verbose {
                         if let Some(ref pb) = pb {
                             pb.suspend(|| {
-                                eprintln!(
-                                    "  \x1b[33m!\x1b[0m skipping {}: {e}",
-                                    file.display()
-                                )
+                                eprintln!("  \x1b[33m!\x1b[0m skipping {}: {e}", file.display())
                             });
                         }
                     }
@@ -337,6 +330,43 @@ fn load_graph(path: &Path) -> anyhow::Result<grapha_core::graph::Graph> {
     let s = store::sqlite::SqliteStore::new(db_path);
     s.load()
         .context("no index found — run `grapha index` first")
+}
+
+fn kind_label(kind: grapha_core::graph::NodeKind) -> String {
+    serde_json::to_string(&kind)
+        .unwrap_or_else(|_| format!("{kind:?}"))
+        .trim_matches('"')
+        .to_string()
+}
+
+fn format_ambiguity_error(query: &str, candidates: &[query::QueryCandidate]) -> String {
+    let mut message = format!("ambiguous query: {query}\n");
+    for candidate in candidates {
+        message.push_str(&format!(
+            "  - {} [{}] in {} ({})\n",
+            candidate.name,
+            kind_label(candidate.kind),
+            candidate.file,
+            candidate.id
+        ));
+    }
+    message.push_str(&format!("hint: {}", query::ambiguity_hint()));
+    message
+}
+
+fn resolve_query_result<T>(
+    result: Result<T, query::QueryResolveError>,
+    missing_label: &str,
+) -> anyhow::Result<T> {
+    match result {
+        Ok(value) => Ok(value),
+        Err(query::QueryResolveError::NotFound { query }) => {
+            Err(anyhow!("{missing_label} not found: {query}"))
+        }
+        Err(query::QueryResolveError::Ambiguous { query, candidates }) => {
+            Err(anyhow!(format_ambiguity_error(&query, &candidates)))
+        }
+    }
 }
 
 fn main() -> anyhow::Result<()> {
@@ -421,8 +451,8 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::Context { symbol, path } => {
             let graph = load_graph(&path)?;
-            let result = query::context::query_context(&graph, &symbol)
-                .ok_or_else(|| anyhow::anyhow!("symbol not found: {symbol}"))?;
+            let result =
+                resolve_query_result(query::context::query_context(&graph, &symbol), "symbol")?;
             println!("{}", serde_json::to_string_pretty(&result)?);
         }
         Commands::Impact {
@@ -431,8 +461,10 @@ fn main() -> anyhow::Result<()> {
             path,
         } => {
             let graph = load_graph(&path)?;
-            let result = query::impact::query_impact(&graph, &symbol, depth)
-                .ok_or_else(|| anyhow::anyhow!("symbol not found: {symbol}"))?;
+            let result = resolve_query_result(
+                query::impact::query_impact(&graph, &symbol, depth),
+                "symbol",
+            )?;
             println!("{}", serde_json::to_string_pretty(&result)?);
         }
         Commands::Changes { scope, path } => {
@@ -458,14 +490,16 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::Trace { entry, depth, path } => {
             let graph = load_graph(&path)?;
-            let result = query::trace::query_trace(&graph, &entry, depth)
-                .ok_or_else(|| anyhow::anyhow!("entry point not found: {entry}"))?;
+            let result = resolve_query_result(
+                query::trace::query_trace(&graph, &entry, depth),
+                "entry point",
+            )?;
             println!("{}", serde_json::to_string_pretty(&result)?);
         }
         Commands::Reverse { symbol, path } => {
             let graph = load_graph(&path)?;
-            let result = query::reverse::query_reverse(&graph, &symbol)
-                .ok_or_else(|| anyhow::anyhow!("symbol not found: {symbol}"))?;
+            let result =
+                resolve_query_result(query::reverse::query_reverse(&graph, &symbol), "symbol")?;
             println!("{}", serde_json::to_string_pretty(&result)?);
         }
         Commands::Entries { path } => {

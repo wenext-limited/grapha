@@ -2,13 +2,10 @@ use std::collections::HashMap;
 
 use grapha_core::graph::{EdgeKind, Graph};
 
-use super::{ContextResult, SymbolInfo, SymbolRef};
+use super::{ContextResult, QueryResolveError, SymbolInfo, SymbolRef};
 
-pub fn query_context(graph: &Graph, query: &str) -> Option<ContextResult> {
-    let node = graph
-        .nodes
-        .iter()
-        .find(|n| n.id == query || n.name == query)?;
+pub fn query_context(graph: &Graph, query: &str) -> Result<ContextResult, QueryResolveError> {
+    let node = crate::query::resolve_node(&graph.nodes, query)?;
 
     let node_index: HashMap<&str, &grapha_core::graph::Node> =
         graph.nodes.iter().map(|n| (n.id.as_str(), n)).collect();
@@ -53,7 +50,7 @@ pub fn query_context(graph: &Graph, query: &str) -> Option<ContextResult> {
         }
     }
 
-    Some(ContextResult {
+    Ok(ContextResult {
         symbol: SymbolInfo {
             id: node.id.clone(),
             name: node.name.clone(),
@@ -141,6 +138,9 @@ mod tests {
     #[test]
     fn context_returns_none_for_unknown() {
         let graph = make_graph();
-        assert!(query_context(&graph, "nonexistent").is_none());
+        assert!(matches!(
+            query_context(&graph, "nonexistent"),
+            Err(QueryResolveError::NotFound { .. })
+        ));
     }
 }
