@@ -4,7 +4,7 @@ use serde::Serialize;
 
 use grapha_core::graph::{EdgeKind, Graph};
 
-use super::SymbolRef;
+use super::{QueryResolveError, SymbolRef};
 
 #[derive(Debug, Serialize)]
 pub struct ImpactResult {
@@ -15,8 +15,12 @@ pub struct ImpactResult {
     pub total_affected: usize,
 }
 
-pub fn query_impact(graph: &Graph, symbol: &str, max_depth: usize) -> Option<ImpactResult> {
-    let node = crate::query::find_node(&graph.nodes, symbol)?;
+pub fn query_impact(
+    graph: &Graph,
+    symbol: &str,
+    max_depth: usize,
+) -> Result<ImpactResult, QueryResolveError> {
+    let node = crate::query::resolve_node(&graph.nodes, symbol)?;
 
     let node_index: HashMap<&str, &grapha_core::graph::Node> =
         graph.nodes.iter().map(|n| (n.id.as_str(), n)).collect();
@@ -73,7 +77,7 @@ pub fn query_impact(graph: &Graph, symbol: &str, max_depth: usize) -> Option<Imp
     }
 
     let total = depth_1.len() + depth_2.len() + depth_3_plus.len();
-    Some(ImpactResult {
+    Ok(ImpactResult {
         source: node.id.clone(),
         depth_1,
         depth_2,
@@ -167,6 +171,9 @@ mod tests {
     #[test]
     fn impact_returns_none_for_unknown() {
         let graph = make_chain_graph();
-        assert!(query_impact(&graph, "z", 5).is_none());
+        assert!(matches!(
+            query_impact(&graph, "z", 5),
+            Err(QueryResolveError::NotFound { .. })
+        ));
     }
 }

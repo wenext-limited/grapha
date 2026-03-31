@@ -4,8 +4,8 @@ use std::path::Path;
 use git2::{DiffOptions, Repository};
 use serde::Serialize;
 
-use grapha_core::graph::Graph;
 use crate::query::impact;
+use grapha_core::graph::Graph;
 
 #[derive(Debug, Serialize)]
 pub struct ChangeReport {
@@ -81,9 +81,13 @@ pub fn detect_changes(
 
     let mut affected_symbols = Vec::new();
     for sym in &changed_symbols {
-        if let Some(impact_result) = impact::query_impact(graph, &sym.id, 3) {
-            affected_symbols.push(impact_result);
-        }
+        let impact_result = impact::query_impact(graph, &sym.id, 3).map_err(|error| {
+            anyhow::anyhow!(
+                "failed to resolve changed symbol {} during impact analysis: {error}",
+                sym.id
+            )
+        })?;
+        affected_symbols.push(impact_result);
     }
 
     let directly_affected: usize = affected_symbols.iter().map(|r| r.depth_1.len()).sum();

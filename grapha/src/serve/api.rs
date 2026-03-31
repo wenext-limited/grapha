@@ -3,7 +3,8 @@ use std::sync::Arc;
 use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
-use serde::Deserialize;
+use axum::response::{IntoResponse, Response};
+use serde::{Deserialize, Serialize};
 
 use crate::query;
 
@@ -18,34 +19,53 @@ pub async fn get_entries(State(state): State<Arc<AppState>>) -> Json<serde_json:
     Json(serde_json::to_value(&result).unwrap_or_default())
 }
 
+#[derive(Serialize)]
+struct QueryErrorPayload {
+    error: &'static str,
+    query: String,
+    candidates: Vec<query::QueryCandidate>,
+    hint: &'static str,
+}
+
+fn query_response<T: Serialize>(result: Result<T, query::QueryResolveError>) -> Response {
+    match result {
+        Ok(value) => Json(serde_json::to_value(&value).unwrap_or_default()).into_response(),
+        Err(query::QueryResolveError::NotFound { .. }) => StatusCode::NOT_FOUND.into_response(),
+        Err(query::QueryResolveError::Ambiguous { query, candidates }) => (
+            StatusCode::BAD_REQUEST,
+            Json(QueryErrorPayload {
+                error: "ambiguous",
+                query,
+                candidates,
+                hint: query::ambiguity_hint(),
+            }),
+        )
+            .into_response(),
+    }
+}
+
 pub async fn get_context(
     State(state): State<Arc<AppState>>,
     Path(symbol): Path<String>,
-) -> Result<Json<serde_json::Value>, StatusCode> {
+) -> impl IntoResponse {
     let decoded = urlencoding::decode(&symbol).unwrap_or_default();
-    let result =
-        query::context::query_context(&state.graph, &decoded).ok_or(StatusCode::NOT_FOUND)?;
-    Ok(Json(serde_json::to_value(&result).unwrap_or_default()))
+    query_response(query::context::query_context(&state.graph, &decoded))
 }
 
 pub async fn get_trace(
     State(state): State<Arc<AppState>>,
     Path(symbol): Path<String>,
-) -> Result<Json<serde_json::Value>, StatusCode> {
+) -> impl IntoResponse {
     let decoded = urlencoding::decode(&symbol).unwrap_or_default();
-    let result =
-        query::trace::query_trace(&state.graph, &decoded, 10).ok_or(StatusCode::NOT_FOUND)?;
-    Ok(Json(serde_json::to_value(&result).unwrap_or_default()))
+    query_response(query::trace::query_trace(&state.graph, &decoded, 10))
 }
 
 pub async fn get_reverse(
     State(state): State<Arc<AppState>>,
     Path(symbol): Path<String>,
-) -> Result<Json<serde_json::Value>, StatusCode> {
+) -> impl IntoResponse {
     let decoded = urlencoding::decode(&symbol).unwrap_or_default();
-    let result =
-        query::reverse::query_reverse(&state.graph, &decoded).ok_or(StatusCode::NOT_FOUND)?;
-    Ok(Json(serde_json::to_value(&result).unwrap_or_default()))
+    query_response(query::reverse::query_reverse(&state.graph, &decoded))
 }
 
 #[derive(Deserialize)]
