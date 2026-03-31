@@ -3,9 +3,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use grapha_core::graph::NodeKind;
 
 use crate::query::{
-    ContextResult, SymbolInfo, SymbolRef, entries::EntriesResult, impact::ImpactResult,
-    impact::ImpactTreeNode, reverse::AffectedEntry, reverse::ReverseResult, trace::Flow,
-    trace::TraceResult,
+    ContextResult, SymbolInfo, SymbolRef, SymbolTreeRef, entries::EntriesResult,
+    impact::ImpactResult, impact::ImpactTreeNode, reverse::AffectedEntry, reverse::ReverseResult,
+    trace::Flow, trace::TraceResult,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,6 +91,15 @@ fn format_symbol_ref(symbol: &SymbolRef) -> String {
     )
 }
 
+fn format_symbol_tree_ref(symbol: &SymbolTreeRef) -> String {
+    format!(
+        "{} [{}] ({})",
+        symbol.name,
+        kind_label(symbol.kind),
+        symbol.file
+    )
+}
+
 fn sorted_symbol_refs(symbols: &[SymbolRef]) -> Vec<SymbolRef> {
     let mut sorted = symbols.to_vec();
     sorted.sort_by(|left, right| {
@@ -100,6 +109,31 @@ fn sorted_symbol_refs(symbols: &[SymbolRef]) -> Vec<SymbolRef> {
             .then_with(|| left.id.cmp(&right.id))
     });
     sorted
+}
+
+fn symbol_tree_ref_to_tree_node(symbol: &SymbolTreeRef) -> TreeNode {
+    TreeNode::branch(
+        format_symbol_tree_ref(symbol),
+        symbol
+            .contains
+            .iter()
+            .map(symbol_tree_ref_to_tree_node)
+            .collect(),
+    )
+}
+
+fn push_symbol_section(children: &mut Vec<TreeNode>, label: &str, symbols: &[SymbolRef]) {
+    if symbols.is_empty() {
+        return;
+    }
+
+    children.push(TreeNode::branch(
+        format!("{label} ({})", symbols.len()),
+        symbols
+            .iter()
+            .map(|symbol| TreeNode::leaf(format_symbol_ref(symbol)))
+            .collect(),
+    ));
 }
 
 fn render_tree(root: &TreeNode) -> String {
@@ -181,29 +215,26 @@ fn reverse_leaf_label(entry: &AffectedEntry) -> String {
 }
 
 pub fn render_context(result: &ContextResult) -> String {
-    let sections = [
-        ("callers", result.callers.clone()),
-        ("callees", result.callees.clone()),
-        ("contains", result.contains.clone()),
-        ("contained_by", result.contained_by.clone()),
-        ("implementors", result.implementors.clone()),
-        ("implements", result.implements.clone()),
-        ("type_refs", result.type_refs.clone()),
-    ];
+    let mut children = Vec::new();
 
-    let children = sections
-        .into_iter()
-        .filter(|(_, symbols)| !symbols.is_empty())
-        .map(|(label, symbols)| {
-            TreeNode::branch(
-                format!("{label} ({})", symbols.len()),
-                symbols
-                    .into_iter()
-                    .map(|symbol| TreeNode::leaf(format_symbol_ref(&symbol)))
-                    .collect(),
-            )
-        })
-        .collect();
+    push_symbol_section(&mut children, "callers", &result.callers);
+    push_symbol_section(&mut children, "callees", &result.callees);
+
+    if !result.contains_tree.is_empty() {
+        children.push(TreeNode::branch(
+            format!("contains ({})", result.contains_tree.len()),
+            result
+                .contains_tree
+                .iter()
+                .map(symbol_tree_ref_to_tree_node)
+                .collect(),
+        ));
+    }
+
+    push_symbol_section(&mut children, "contained_by", &result.contained_by);
+    push_symbol_section(&mut children, "implementors", &result.implementors);
+    push_symbol_section(&mut children, "implements", &result.implements);
+    push_symbol_section(&mut children, "type_refs", &result.type_refs);
 
     render_tree(&TreeNode::branch(
         format_symbol_info(&result.symbol),
@@ -309,9 +340,10 @@ mod tests {
     use grapha_core::graph::NodeKind;
 
     use crate::query::{
-        ContextResult, SymbolInfo, SymbolRef, entries::EntriesResult, impact::ImpactResult,
-        impact::ImpactTreeNode, reverse::AffectedEntry, reverse::ReverseResult, trace::Flow,
-        trace::TerminalInfo, trace::TraceResult, trace::TraceSummary,
+        ContextResult, SymbolInfo, SymbolRef, SymbolTreeRef, entries::EntriesResult,
+        impact::ImpactResult, impact::ImpactTreeNode, reverse::AffectedEntry,
+        reverse::ReverseResult, trace::Flow, trace::TerminalInfo, trace::TraceResult,
+        trace::TraceSummary,
     };
 
     use super::*;
@@ -342,6 +374,7 @@ mod tests {
             callers: vec![symbol_ref("main", NodeKind::Function, "main.rs")],
             callees: Vec::new(),
             contains: Vec::new(),
+            contains_tree: Vec::new(),
             contained_by: Vec::new(),
             implementors: Vec::new(),
             implements: Vec::new(),
@@ -362,10 +395,29 @@ mod tests {
             symbol: symbol_info("body", NodeKind::Property, "ContentView.swift"),
             callers: Vec::new(),
             callees: Vec::new(),
-            contains: vec![
-                symbol_ref("VStack", NodeKind::View, "ContentView.swift"),
-                symbol_ref("Text", NodeKind::View, "ContentView.swift"),
-            ],
+            contains: vec![symbol_ref("VStack", NodeKind::View, "ContentView.swift")],
+            contains_tree: vec![SymbolTreeRef {
+                id: "ContentView.swift::body::VStack".into(),
+                name: "VStack".into(),
+                kind: NodeKind::View,
+                file: "ContentView.swift".into(),
+                contains: vec![
+                    SymbolTreeRef {
+                        id: "ContentView.swift::body::Text".into(),
+                        name: "Text".into(),
+                        kind: NodeKind::View,
+                        file: "ContentView.swift".into(),
+                        contains: Vec::new(),
+                    },
+                    SymbolTreeRef {
+                        id: "ContentView.swift::body::Row".into(),
+                        name: "Row".into(),
+                        kind: NodeKind::View,
+                        file: "ContentView.swift".into(),
+                        contains: Vec::new(),
+                    },
+                ],
+            }],
             contained_by: vec![symbol_ref(
                 "ContentView",
                 NodeKind::Struct,
@@ -377,9 +429,11 @@ mod tests {
         };
 
         let rendered = render_context(&result);
-        assert!(rendered.contains("contains (2)"));
-        assert!(rendered.contains("VStack [view] (ContentView.swift)"));
-        assert!(rendered.contains("Text [view] (ContentView.swift)"));
+        assert!(rendered.contains("contains (1)"));
+        assert!(rendered.contains("├── contains (1)"));
+        assert!(rendered.contains("│   └── VStack [view] (ContentView.swift)"));
+        assert!(rendered.contains("│       ├── Text [view] (ContentView.swift)"));
+        assert!(rendered.contains("│       └── Row [view] (ContentView.swift)"));
         assert!(rendered.contains("contained_by (1)"));
         assert!(rendered.contains("ContentView [struct] (ContentView.swift)"));
     }

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use grapha_core::graph::{EdgeKind, Graph};
 
-use super::{ContextResult, QueryResolveError, SymbolInfo, SymbolRef};
+use super::{ContextResult, QueryResolveError, SymbolInfo, SymbolRef, SymbolTreeRef};
 
 fn to_symbol_ref(node: &grapha_core::graph::Node) -> SymbolRef {
     SymbolRef {
@@ -10,6 +10,19 @@ fn to_symbol_ref(node: &grapha_core::graph::Node) -> SymbolRef {
         name: node.name.clone(),
         kind: node.kind,
         file: node.file.to_string_lossy().to_string(),
+    }
+}
+
+fn to_symbol_tree_ref(
+    node: &grapha_core::graph::Node,
+    contains: Vec<SymbolTreeRef>,
+) -> SymbolTreeRef {
+    SymbolTreeRef {
+        id: node.id.clone(),
+        name: node.name.clone(),
+        kind: node.kind,
+        file: node.file.to_string_lossy().to_string(),
+        contains,
     }
 }
 
@@ -40,11 +53,37 @@ fn sort_ids_by_span<'a>(
     );
 }
 
+fn build_contains_tree<'a>(
+    node_id: &'a str,
+    contains_adj: &HashMap<&'a str, Vec<&'a str>>,
+    node_index: &HashMap<&'a str, &'a grapha_core::graph::Node>,
+    ancestors: &mut Vec<&'a str>,
+) -> Option<SymbolTreeRef> {
+    if ancestors.contains(&node_id) {
+        return None;
+    }
+
+    let node = node_index.get(node_id).copied()?;
+    ancestors.push(node_id);
+
+    let mut child_ids = contains_adj.get(node_id).cloned().unwrap_or_default();
+    sort_ids_by_span(&mut child_ids, node_index);
+
+    let contains = child_ids
+        .into_iter()
+        .filter_map(|child_id| build_contains_tree(child_id, contains_adj, node_index, ancestors))
+        .collect();
+
+    ancestors.pop();
+    Some(to_symbol_tree_ref(node, contains))
+}
+
 pub fn query_context(graph: &Graph, query: &str) -> Result<ContextResult, QueryResolveError> {
     let node = crate::query::resolve_node(&graph.nodes, query)?;
 
     let node_index: HashMap<&str, &grapha_core::graph::Node> =
         graph.nodes.iter().map(|n| (n.id.as_str(), n)).collect();
+    let mut contains_adj: HashMap<&str, Vec<&str>> = HashMap::new();
 
     let mut callers = Vec::new();
     let mut callees = Vec::new();
@@ -78,6 +117,13 @@ pub fn query_context(graph: &Graph, query: &str) -> Result<ContextResult, QueryR
                 _ => {}
             }
         }
+
+        if edge.kind == EdgeKind::Contains {
+            contains_adj
+                .entry(edge.source.as_str())
+                .or_default()
+                .push(edge.target.as_str());
+        }
     }
 
     sort_refs_by_name(&mut callers);
@@ -88,6 +134,10 @@ pub fn query_context(graph: &Graph, query: &str) -> Result<ContextResult, QueryR
     sort_ids_by_span(&mut contains_ids, &node_index);
     sort_ids_by_span(&mut contained_by_ids, &node_index);
 
+    let contains_tree = contains_ids
+        .iter()
+        .filter_map(|node_id| build_contains_tree(node_id, &contains_adj, &node_index, &mut vec![]))
+        .collect();
     let contains = contains_ids
         .into_iter()
         .filter_map(|node_id| node_index.get(node_id).copied())
@@ -110,6 +160,7 @@ pub fn query_context(graph: &Graph, query: &str) -> Result<ContextResult, QueryR
         callers,
         callees,
         contains,
+        contains_tree,
         contained_by,
         implementors,
         implements,
@@ -285,7 +336,7 @@ mod tests {
                 },
                 Edge {
                     source: "view.swift::ContentView::body".into(),
-                    target: "view.swift::ContentView::body::view:Row@5:12".into(),
+                    target: "view.swift::ContentView::body::view:VStack@3:8".into(),
                     kind: EdgeKind::Contains,
                     confidence: 1.0,
                     direction: None,
@@ -294,7 +345,7 @@ mod tests {
                     async_boundary: None,
                 },
                 Edge {
-                    source: "view.swift::ContentView::body".into(),
+                    source: "view.swift::ContentView::body::view:VStack@3:8".into(),
                     target: "view.swift::ContentView::body::view:Text@4:12".into(),
                     kind: EdgeKind::Contains,
                     confidence: 1.0,
@@ -304,8 +355,8 @@ mod tests {
                     async_boundary: None,
                 },
                 Edge {
-                    source: "view.swift::ContentView::body".into(),
-                    target: "view.swift::ContentView::body::view:VStack@3:8".into(),
+                    source: "view.swift::ContentView::body::view:VStack@3:8".into(),
+                    target: "view.swift::ContentView::body::view:Row@5:12".into(),
                     kind: EdgeKind::Contains,
                     confidence: 1.0,
                     direction: None,
@@ -317,13 +368,23 @@ mod tests {
         };
 
         let ctx = query_context(&graph, "body").unwrap();
-        assert_eq!(ctx.contains.len(), 3);
+        assert_eq!(ctx.contains.len(), 1);
         assert_eq!(
             ctx.contains
                 .iter()
                 .map(|symbol| symbol.name.as_str())
                 .collect::<Vec<_>>(),
-            vec!["VStack", "Text", "Row"]
+            vec!["VStack"]
+        );
+        assert_eq!(ctx.contains_tree.len(), 1);
+        assert_eq!(ctx.contains_tree[0].name, "VStack");
+        assert_eq!(
+            ctx.contains_tree[0]
+                .contains
+                .iter()
+                .map(|symbol| symbol.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Text", "Row"]
         );
         assert_eq!(ctx.contained_by.len(), 1);
         assert_eq!(ctx.contained_by[0].name, "ContentView");

@@ -173,6 +173,7 @@ pub struct ContextResult {
     pub callers: Vec<SymbolRef>,
     pub callees: Vec<SymbolRef>,
     pub contains: Vec<SymbolRef>,
+    pub contains_tree: Vec<SymbolTreeRef>,
     pub contained_by: Vec<SymbolRef>,
     pub implementors: Vec<SymbolRef>,
     pub implements: Vec<SymbolRef>,
@@ -194,6 +195,16 @@ pub struct SymbolRef {
     pub name: String,
     pub kind: NodeKind,
     pub file: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SymbolTreeRef {
+    pub id: String,
+    pub name: String,
+    pub kind: NodeKind,
+    pub file: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub contains: Vec<SymbolTreeRef>,
 }
 
 #[cfg(test)]
