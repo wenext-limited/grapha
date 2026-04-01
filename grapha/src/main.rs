@@ -254,19 +254,33 @@ fn run_pipeline(path: &Path, verbose: bool) -> anyhow::Result<grapha_core::graph
     let t = Instant::now();
     let registry = builtin_registry()?;
     let project_context = grapha_core::project_context(path);
-    let files = grapha_core::pipeline::discover_files(path, &registry)
-        .context("failed to discover files")?;
+
+    let cfg = config::load_config(path);
+
+    // Signal the Swift plugin to skip index store loading when disabled
+    if !cfg.swift.index_store {
+        // SAFETY: called before spawning threads; no concurrent readers yet.
+        unsafe { std::env::set_var("GRAPHA_SKIP_INDEX_STORE", "1") };
+    }
+
+    // Run file discovery and plugin init concurrently
+    let (files, _) = std::thread::scope(|scope| {
+        let files_handle = scope.spawn(|| {
+            grapha_core::pipeline::discover_files(path, &registry)
+                .context("failed to discover files")
+        });
+        let plugin_handle =
+            scope.spawn(|| grapha_core::prepare_plugins(&registry, &project_context));
+        let files = files_handle.join().expect("discover thread panicked")?;
+        plugin_handle.join().expect("plugin thread panicked")?;
+        Ok::<_, anyhow::Error>((files, ()))
+    })?;
 
     if verbose {
         progress::done(&format!("discovered {} files", files.len()), t);
-    }
-
-    let t = Instant::now();
-    grapha_core::prepare_plugins(&registry, &project_context)?;
-    if let Some(store) = grapha_swift::index_store_path()
-        && verbose
-    {
-        progress::done(&format!("index store: {}", store.display()), t);
+        if let Some(store) = grapha_swift::index_store_path() {
+            progress::done(&format!("index store: {}", store.display()), t);
+        }
     }
 
     let module_map = grapha_core::discover_modules(&registry, &project_context)?;
