@@ -269,6 +269,15 @@ enum RepoCommands {
         #[arg(short, long, default_value = ".")]
         path: PathBuf,
     },
+    /// Show file/symbol map for orientation in large projects
+    Map {
+        /// Filter by module name
+        #[arg(long)]
+        module: Option<String>,
+        /// Project directory
+        #[arg(short, long, default_value = ".")]
+        path: PathBuf,
+    },
 }
 
 fn builtin_registry() -> anyhow::Result<grapha_core::LanguageRegistry> {
@@ -1015,6 +1024,11 @@ fn handle_repo_command(command: RepoCommands) -> anyhow::Result<()> {
             let graph = load_graph(&path)?;
             let report = changes::detect_changes(&path, &graph, &scope)?;
             print_json(&report)
+        }
+        RepoCommands::Map { module, path } => {
+            let graph = load_graph(&path)?;
+            let map = query::map::file_map(&graph, module.as_deref());
+            print_json(&map)
         }
     }
 }

@@ -4,6 +4,7 @@ pub mod entries;
 pub(crate) mod flow;
 pub mod impact;
 pub(crate) mod l10n;
+pub mod map;
 pub mod localize;
 pub mod reverse;
 pub mod trace;
