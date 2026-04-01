@@ -80,17 +80,25 @@ private final class OccCollector: @unchecked Sendable {
 
 import Synchronization
 
-// MARK: - Callback State (file-level to avoid captures in @convention(c) callbacks)
-// These are used as temporary storage during synchronous _apply_f iterations.
-// Protected by _cbLock for thread safety. The nonisolated(unsafe) globals are
-// required because @convention(c) callbacks cannot capture context.
-private let _cbLock = Mutex<Void>(())
+// MARK: - Callback State
+
+// buildFileIndex globals — only called once, no concurrency concern.
+private let _buildIndexLock = Mutex<Void>(())
 nonisolated(unsafe) private var _cbStore: indexstore_t? = nil
 nonisolated(unsafe) private var _cbFileIndex: [String: UnitInfo] = [:]
 nonisolated(unsafe) private var _cbRecordName: String? = nil
-nonisolated(unsafe) private var _cbCollector: OccCollector? = nil
-nonisolated(unsafe) private var _cbRelSymbolUSR: String = ""
-nonisolated(unsafe) private var _cbRelRoles: UInt64 = 0
+
+/// Per-extraction context passed through the `ctx` pointer of _apply_f callbacks.
+/// This eliminates global mutable state, allowing concurrent extractions.
+private final class ExtractionContext {
+    let collector: OccCollector
+    var relSymbolUSR: String = ""
+    var relRoles: UInt64 = 0
+
+    init(collector: OccCollector) {
+        self.collector = collector
+    }
+}
 
 /// Pre-built lookup: mainFile path → (unitName, moduleName, recordName).
 /// recordName is pre-fetched during buildFileIndex to avoid a second unit reader open per extraction.
@@ -132,10 +140,13 @@ final class IndexStoreReader: @unchecked Sendable {
     // MARK: - Public
 
     func extractFile(_ filePath: String) -> (UnsafeMutableRawPointer, UInt32)? {
-        return _cbLock.withLock { _ -> (UnsafeMutableRawPointer, UInt32)? in
-
+        // Build the file index once (thread-safe via lock)
         if fileIndex == nil {
-            fileIndex = buildFileIndex()
+            _buildIndexLock.withLock { _ in
+                if fileIndex == nil {
+                    fileIndex = buildFileIndex()
+                }
+            }
         }
 
         let resolved = resolvePath(filePath)
@@ -152,6 +163,7 @@ final class IndexStoreReader: @unchecked Sendable {
         guard let unitInfo else { return nil }
         guard let recordName = unitInfo.recordName else { return nil }
 
+        // No global lock — each extraction uses its own context via ctx pointer
         let collector = readOccurrences(
             recordName: recordName,
             fileName: fileName,
@@ -159,7 +171,6 @@ final class IndexStoreReader: @unchecked Sendable {
         )
 
         return buildBinaryBuffer(nodes: collector.nodes.values, edges: collector.edges)
-        }
     }
 
     // MARK: - File Index (built once)
@@ -217,24 +228,26 @@ final class IndexStoreReader: @unchecked Sendable {
         }
         defer { indexstore_record_reader_dispose(reader) }
 
-        _cbCollector = collector
+        let ctx = ExtractionContext(collector: collector)
+        let ctxPtr = Unmanaged.passUnretained(ctx).toOpaque()
 
         let cb: @convention(c) (UnsafeMutableRawPointer?, indexstore_occurrence_t?) -> Bool = {
-            _, occ in
-            guard let occ, let c = _cbCollector else { return true }
-            processOccurrence(collector: c, occ: occ)
+            rawCtx, occ in
+            guard let rawCtx, let occ else { return true }
+            let ctx = Unmanaged<ExtractionContext>.fromOpaque(rawCtx).takeUnretainedValue()
+            processOccurrence(ctx: ctx, occ: occ)
             return true
         }
 
-        _ = indexstore_record_reader_occurrences_apply_f(reader, nil, cb)
-        _cbCollector = nil
+        _ = indexstore_record_reader_occurrences_apply_f(reader, ctxPtr, cb)
         return collector
     }
 }
 
 // MARK: - Occurrence Processing
 
-private func processOccurrence(collector c: OccCollector, occ: indexstore_occurrence_t) {
+private func processOccurrence(ctx: ExtractionContext, occ: indexstore_occurrence_t) {
+    let c = ctx.collector
     let symbol = indexstore_occurrence_get_symbol(occ)!
     let roles = indexstore_occurrence_get_roles(occ)
     let usr = str(indexstore_symbol_get_usr(symbol))
@@ -256,57 +269,52 @@ private func processOccurrence(collector c: OccCollector, occ: indexstore_occurr
         )
     }
 
-    // Extract edges from relations — writes directly into _cbCollector (c)
-    extractRelationEdges(occ: occ, symbolUSR: usr, roles: roles)
-}
-
-private func extractRelationEdges(
-    occ: indexstore_occurrence_t,
-    symbolUSR: String,
-    roles: UInt64
-) {
-    _cbRelSymbolUSR = symbolUSR
-    _cbRelRoles = roles
+    // Extract edges from relations — pass context through ctx pointer
+    ctx.relSymbolUSR = usr
+    ctx.relRoles = roles
+    let ctxPtr = Unmanaged.passUnretained(ctx).toOpaque()
 
     let cb: @convention(c) (UnsafeMutableRawPointer?, indexstore_symbol_relation_t?) -> Bool = {
-        _, rel in
-        guard let rel, let c = _cbCollector else { return true }
+        rawCtx, rel in
+        guard let rawCtx, let rel else { return true }
+        let ctx = Unmanaged<ExtractionContext>.fromOpaque(rawCtx).takeUnretainedValue()
+        let c = ctx.collector
         let relSym = indexstore_symbol_relation_get_symbol(rel)!
         let relUSR = str(indexstore_symbol_get_usr(relSym))
         guard !relUSR.isEmpty else { return true }
 
         let relRoles = indexstore_symbol_relation_get_roles(rel)
-        let combinedRoles = _cbRelRoles | relRoles
+        let combinedRoles = ctx.relRoles | relRoles
 
         if (combinedRoles & Roles.call) != 0 {
             c.edges.insert(ExtractedEdge(
-                source: relUSR, target: _cbRelSymbolUSR,
+                source: relUSR, target: ctx.relSymbolUSR,
                 kind: BinaryEdgeKind.calls, confidencePct: 100
             ))
         } else if (combinedRoles & Roles.containedBy) != 0 {
             c.edges.insert(ExtractedEdge(
-                source: relUSR, target: _cbRelSymbolUSR,
+                source: relUSR, target: ctx.relSymbolUSR,
                 kind: BinaryEdgeKind.contains, confidencePct: 100
             ))
         }
 
         if (combinedRoles & Roles.baseOf) != 0 {
             c.edges.insert(ExtractedEdge(
-                source: _cbRelSymbolUSR, target: relUSR,
+                source: ctx.relSymbolUSR, target: relUSR,
                 kind: BinaryEdgeKind.inherits, confidencePct: 100
             ))
         }
 
         if (combinedRoles & Roles.conformsTo) != 0 {
             c.edges.insert(ExtractedEdge(
-                source: _cbRelSymbolUSR, target: relUSR,
+                source: ctx.relSymbolUSR, target: relUSR,
                 kind: BinaryEdgeKind.implements, confidencePct: 100
             ))
         }
 
         if (combinedRoles & Roles.overrideOf) != 0 {
             c.edges.insert(ExtractedEdge(
-                source: _cbRelSymbolUSR, target: relUSR,
+                source: ctx.relSymbolUSR, target: relUSR,
                 kind: BinaryEdgeKind.implements, confidencePct: 90
             ))
         }
@@ -318,7 +326,7 @@ private func extractRelationEdges(
             && (combinedRoles & Roles.conformsTo) == 0
         {
             c.edges.insert(ExtractedEdge(
-                source: _cbRelSymbolUSR, target: relUSR,
+                source: ctx.relSymbolUSR, target: relUSR,
                 kind: BinaryEdgeKind.typeRef, confidencePct: 90
             ))
         }
@@ -326,7 +334,7 @@ private func extractRelationEdges(
         return true
     }
 
-    _ = indexstore_occurrence_relations_apply_f(occ, nil, cb)
+    _ = indexstore_occurrence_relations_apply_f(occ, ctxPtr, cb)
 }
 
 // MARK: - Symbol Kind Mapping
