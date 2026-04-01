@@ -196,6 +196,22 @@ enum SymbolCommands {
         #[arg(long)]
         fields: Option<String>,
     },
+    /// Analyze structural complexity of a type (properties, dependencies, invalidation surface)
+    Complexity {
+        /// Type name or ID to analyze
+        symbol: String,
+        /// Project directory
+        #[arg(short, long, default_value = ".")]
+        path: PathBuf,
+    },
+    /// List all declarations in a file, ordered by source position
+    File {
+        /// File name or path suffix (e.g. "RoomPage.swift" or "src/main.rs")
+        file: String,
+        /// Project directory
+        #[arg(short, long, default_value = ".")]
+        path: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -311,6 +327,21 @@ enum RepoCommands {
         /// Filter by module name
         #[arg(long)]
         module: Option<String>,
+        /// Project directory
+        #[arg(short, long, default_value = ".")]
+        path: PathBuf,
+    },
+    /// Detect code smells across the graph (god types, deep nesting, wide invalidation, etc.)
+    Smells {
+        /// Filter to a specific module
+        #[arg(long)]
+        module: Option<String>,
+        /// Project directory
+        #[arg(short, long, default_value = ".")]
+        path: PathBuf,
+    },
+    /// Show per-module metrics (symbol counts, coupling, entry points)
+    Modules {
         /// Project directory
         #[arg(short, long, default_value = ".")]
         path: PathBuf,
@@ -1042,6 +1073,20 @@ fn handle_symbol_command(
                 render::render_impact_with_options,
             )
         }
+        SymbolCommands::Complexity { symbol, path } => {
+            let graph = load_graph(&path)?;
+            let result =
+                query::complexity::query_complexity(&graph, &symbol).map_err(|e| anyhow!("{e}"))?;
+            print_json(&result)
+        }
+        SymbolCommands::File { file, path } => {
+            let graph = load_graph(&path)?;
+            let result = query::file_symbols::query_file_symbols(&graph, &file);
+            if result.total == 0 {
+                anyhow::bail!("no symbols found in file matching: {file}");
+            }
+            print_json(&result)
+        }
     }
 }
 
@@ -1187,6 +1232,37 @@ fn handle_repo_command(command: RepoCommands) -> anyhow::Result<()> {
             let graph = load_graph(&path)?;
             let map = query::map::file_map(&graph, module.as_deref());
             print_json(&map)
+        }
+        RepoCommands::Smells { module, path } => {
+            let graph = load_graph(&path)?;
+            let mut result = query::smells::detect_smells(&graph);
+
+            if let Some(ref module_name) = module {
+                let module_lower = module_name.to_lowercase();
+                result.smells.retain(|smell| {
+                    graph.nodes.iter().any(|n| {
+                        n.id == smell.symbol.id
+                            && n.module
+                                .as_ref()
+                                .is_some_and(|m| m.to_lowercase() == module_lower)
+                    })
+                });
+                result.total = result.smells.len();
+                result.by_severity.clear();
+                for smell in &result.smells {
+                    *result
+                        .by_severity
+                        .entry(smell.severity.clone())
+                        .or_default() += 1;
+                }
+            }
+
+            print_json(&result)
+        }
+        RepoCommands::Modules { path } => {
+            let graph = load_graph(&path)?;
+            let result = query::module_summary::query_module_summary(&graph);
+            print_json(&result)
         }
     }
 }
