@@ -1677,7 +1677,17 @@ fn emit_dependency_read(
         return;
     };
 
-    let target_id = dependency_target_id(owner_id, file, module_path, &name);
+    // Scope read targets to the enclosing type when possible.
+    // Without this, bare targets like "File.swift::viewModel" match ALL viewModel
+    // properties across the codebase during merge, causing false positive reads.
+    let target_id = same_owner_member_id(owner_id, &name).unwrap_or_else(|| {
+        if let Some(ref owner) = owner_name {
+            // Scope to the enclosing type: "File.swift::OwnerType::propertyName"
+            make_id(file, &[owner.clone()], &name)
+        } else {
+            make_id(file, module_path, &name)
+        }
+    });
     if target_id == owner_id {
         return;
     }
