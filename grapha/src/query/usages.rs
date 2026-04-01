@@ -107,7 +107,7 @@ fn to_symbol_info(node: &Node) -> SymbolInfo {
     }
 }
 
-fn contains_parents<'a>(graph: &'a Graph) -> HashMap<&'a str, &'a str> {
+fn contains_parents(graph: &Graph) -> HashMap<&str, &str> {
     let mut map = HashMap::new();
     for edge in &graph.edges {
         if edge.kind == EdgeKind::Contains {

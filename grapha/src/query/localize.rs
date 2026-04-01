@@ -97,7 +97,7 @@ fn to_symbol_info(node: &Node) -> SymbolInfo {
     }
 }
 
-fn contains_adjacency<'a>(graph: &'a Graph) -> HashMap<&'a str, Vec<&'a str>> {
+fn contains_adjacency(graph: &Graph) -> HashMap<&str, Vec<&str>> {
     let mut map: HashMap<&str, Vec<&str>> = HashMap::new();
     for edge in &graph.edges {
         if edge.kind == EdgeKind::Contains {
@@ -109,7 +109,7 @@ fn contains_adjacency<'a>(graph: &'a Graph) -> HashMap<&'a str, Vec<&'a str>> {
     map
 }
 
-fn contains_parents<'a>(graph: &'a Graph) -> HashMap<&'a str, &'a str> {
+fn contains_parents(graph: &Graph) -> HashMap<&str, &str> {
     let mut map = HashMap::new();
     for edge in &graph.edges {
         if edge.kind == EdgeKind::Contains {

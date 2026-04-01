@@ -3,13 +3,8 @@ mod classify;
 mod compress;
 mod config;
 mod delta;
-mod discover;
-mod error;
-mod extract;
 mod filter;
 mod localization;
-mod merge;
-mod module;
 mod progress;
 mod query;
 mod render;
@@ -211,160 +206,34 @@ enum Commands {
     },
 }
 
-/// Set `node.module` on every node in an extraction result.
-fn stamp_module(
-    result: extract::ExtractionResult,
-    module_name: &Option<String>,
-) -> extract::ExtractionResult {
-    let module_name = match module_name {
-        Some(name) => name,
-        None => return result,
-    };
-
-    let manifest_id_remap: std::collections::HashMap<String, String> = result
-        .nodes
-        .iter()
-        .filter(|node| {
-            node.file.file_name().and_then(|name| name.to_str()) == Some("Package.swift")
-        })
-        .map(|node| {
-            (
-                node.id.clone(),
-                format!("{}@@module:{}", node.id, module_name),
-            )
-        })
-        .collect();
-
-    let nodes = result
-        .nodes
-        .into_iter()
-        .map(|mut node| {
-            node.module = Some(module_name.clone());
-            if let Some(remapped_id) = manifest_id_remap.get(&node.id) {
-                node.id = remapped_id.clone();
-            }
-            node
-        })
-        .collect();
-
-    let edges = result
-        .edges
-        .into_iter()
-        .map(|mut edge| {
-            if let Some(remapped_id) = manifest_id_remap.get(&edge.source) {
-                edge.source = remapped_id.clone();
-            }
-            if let Some(remapped_id) = manifest_id_remap.get(&edge.target) {
-                edge.target = remapped_id.clone();
-            }
-            for provenance in &mut edge.provenance {
-                if let Some(remapped_id) = manifest_id_remap.get(&provenance.symbol_id) {
-                    provenance.symbol_id = remapped_id.clone();
-                }
-            }
-            edge
-        })
-        .collect();
-
-    extract::ExtractionResult {
-        nodes,
-        edges,
-        imports: result.imports,
-    }
-}
-
-fn normalize_graph(mut graph: grapha_core::graph::Graph) -> grapha_core::graph::Graph {
-    fn visibility_rank(visibility: &grapha_core::graph::Visibility) -> u8 {
-        match visibility {
-            grapha_core::graph::Visibility::Private => 0,
-            grapha_core::graph::Visibility::Crate => 1,
-            grapha_core::graph::Visibility::Public => 2,
-        }
-    }
-
-    fn merge_node(existing: &mut grapha_core::graph::Node, incoming: grapha_core::graph::Node) {
-        if visibility_rank(&incoming.visibility) > visibility_rank(&existing.visibility) {
-            existing.visibility = incoming.visibility;
-        }
-        if existing.role.is_none() {
-            existing.role = incoming.role;
-        }
-        if existing.signature.is_none() {
-            existing.signature = incoming.signature;
-        }
-        if existing.doc_comment.is_none() {
-            existing.doc_comment = incoming.doc_comment;
-        }
-        if existing.module.is_none() {
-            existing.module = incoming.module;
-        }
-        for (key, value) in incoming.metadata {
-            existing.metadata.entry(key).or_insert(value);
-        }
-    }
-
-    let mut node_index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    let mut normalized_nodes: Vec<grapha_core::graph::Node> = Vec::with_capacity(graph.nodes.len());
-    for node in graph.nodes {
-        if let Some(existing_index) = node_index.get(&node.id).copied() {
-            merge_node(&mut normalized_nodes[existing_index], node);
-        } else {
-            node_index.insert(node.id.clone(), normalized_nodes.len());
-            normalized_nodes.push(node);
-        }
-    }
-
-    let mut edge_index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    let mut normalized_edges: Vec<grapha_core::graph::Edge> = Vec::with_capacity(graph.edges.len());
-
-    for edge in graph.edges {
-        let fingerprint = delta::edge_fingerprint(&edge);
-        if let Some(existing_index) = edge_index.get(&fingerprint).copied() {
-            let existing = &mut normalized_edges[existing_index];
-            existing.confidence = existing.confidence.max(edge.confidence);
-            for provenance in edge.provenance {
-                if !existing
-                    .provenance
-                    .iter()
-                    .any(|current| current == &provenance)
-                {
-                    existing.provenance.push(provenance);
-                }
-            }
-        } else {
-            edge_index.insert(fingerprint, normalized_edges.len());
-            normalized_edges.push(edge);
-        }
-    }
-
-    graph.nodes = normalized_nodes;
-    graph.edges = normalized_edges;
-    graph
+fn builtin_registry() -> anyhow::Result<grapha_core::LanguageRegistry> {
+    let mut registry = grapha_core::LanguageRegistry::new();
+    grapha_rust::register_builtin(&mut registry)?;
+    grapha_swift::register_builtin(&mut registry)?;
+    Ok(registry)
 }
 
 /// Run the extraction pipeline on a path, returning a merged graph.
 fn run_pipeline(path: &Path, verbose: bool) -> anyhow::Result<grapha_core::graph::Graph> {
     let t = Instant::now();
-
-    let all_extensions: &[&str] = &["rs", "swift"];
-    let files =
-        discover::discover_files(path, all_extensions).context("failed to discover files")?;
+    let registry = builtin_registry()?;
+    let project_context = grapha_core::project_context(path);
+    let files = grapha_core::pipeline::discover_files(path, &registry)
+        .context("failed to discover files")?;
 
     if verbose {
         progress::done(&format!("discovered {} files", files.len()), t);
     }
 
-    let abs_root = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    let module_map = module::ModuleMap::discover(&abs_root);
-
-    // Pre-discover index store before starting the progress bar
     let t = Instant::now();
-    grapha_swift::init_index_store(&abs_root);
+    grapha_core::prepare_plugins(&registry, &project_context)?;
     if let Some(store) = grapha_swift::index_store_path()
         && verbose
     {
         progress::done(&format!("index store: {}", store.display()), t);
     }
+
+    let module_map = grapha_core::discover_modules(&registry, &project_context)?;
 
     let t = Instant::now();
     let pb = if verbose && files.len() > 1 {
@@ -381,14 +250,6 @@ fn run_pipeline(path: &Path, verbose: bool) -> anyhow::Result<grapha_core::graph
     let results: Vec<_> = files
         .par_iter()
         .filter_map(|file| {
-            let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("");
-            if !matches!(ext, "rs" | "swift") {
-                if let Some(ref pb) = pb {
-                    pb.inc(1);
-                }
-                return None;
-            }
-
             let source = match std::fs::read(file) {
                 Ok(s) => s,
                 Err(_) => {
@@ -399,40 +260,16 @@ fn run_pipeline(path: &Path, verbose: bool) -> anyhow::Result<grapha_core::graph
                     return None;
                 }
             };
-
-            let relative = if path.is_dir() {
-                file.strip_prefix(path).unwrap_or(file)
-            } else {
-                file.file_name()
-                    .map(|n| n.as_ref())
-                    .unwrap_or(file.as_path())
-            };
-
-            let abs_file = std::fs::canonicalize(file).unwrap_or_else(|_| abs_root.join(relative));
-            let file_module = module_map.module_for_file(&abs_file).or_else(|| {
-                relative
-                    .components()
-                    .next()
-                    .and_then(|c| c.as_os_str().to_str())
-                    .map(|s| s.to_string())
-            });
-
-            let extraction_result = match ext {
-                "swift" => grapha_swift::extract_swift(&source, relative, None, Some(&abs_root)),
-                "rs" => {
-                    let extractor = extract::rust::RustExtractor;
-                    use grapha_core::LanguageExtractor;
-                    extractor.extract(&source, relative)
-                }
-                _ => return None,
-            };
+            let file_context = grapha_core::file_context(&project_context, &module_map, file);
+            let extraction_result =
+                grapha_core::extract_with_registry(&registry, &source, &file_context);
 
             if let Some(ref pb) = pb {
                 pb.inc(1);
             }
 
             match extraction_result {
-                Ok(result) => Some(stamp_module(result, &file_module)),
+                Ok(result) => Some(result),
                 Err(e) => {
                     skipped.fetch_add(1, Ordering::Relaxed);
                     if verbose && let Some(ref pb) = pb {
@@ -461,8 +298,22 @@ fn run_pipeline(path: &Path, verbose: bool) -> anyhow::Result<grapha_core::graph
         progress::done(&msg, t);
     }
 
+    let cfg = config::load_config(path);
+    let mut classifiers = registry.collect_classifiers();
+    classifiers.insert(
+        0,
+        Box::new(classify::toml_rules::TomlRulesClassifier::new(
+            &cfg.classifiers,
+        )),
+    );
+    let composite = grapha_core::CompositeClassifier::new(classifiers);
+    let preclassified_results: Vec<_> = results
+        .into_iter()
+        .map(|result| grapha_core::classify_extraction_result(result, &composite))
+        .collect();
+
     let t = Instant::now();
-    let merged = merge::merge(results);
+    let merged = grapha_core::merge(preclassified_results);
     if verbose {
         progress::done(
             &format!(
@@ -475,16 +326,11 @@ fn run_pipeline(path: &Path, verbose: bool) -> anyhow::Result<grapha_core::graph
     }
 
     let t = Instant::now();
-    let cfg = config::load_config(path);
-    let classifiers: Vec<Box<dyn classify::Classifier>> = vec![
-        Box::new(classify::toml_rules::TomlRulesClassifier::new(
-            &cfg.classifiers,
-        )),
-        Box::new(classify::swift::SwiftClassifier::new()),
-        Box::new(classify::rust::RustClassifier::new()),
-    ];
-    let composite = classify::CompositeClassifier::new(classifiers);
-    let graph = normalize_graph(classify::pass::classify_graph(&merged, &composite));
+    let mut graph = grapha_core::classify_graph(&merged, &composite);
+    for pass in registry.collect_graph_passes() {
+        graph = pass.apply(graph);
+    }
+    let graph = grapha_core::normalize_graph(graph);
     if verbose {
         let terminal_count = graph
             .nodes
@@ -935,178 +781,4 @@ fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{normalize_graph, stamp_module};
-    use grapha_core::ExtractionResult;
-    use grapha_core::graph::{
-        Edge, EdgeKind, EdgeProvenance, Graph, Node, NodeKind, Span, Visibility,
-    };
-    use std::collections::HashMap;
-    use std::path::PathBuf;
-
-    #[test]
-    fn stamp_module_namespaces_package_manifest_ids() {
-        let result = ExtractionResult {
-            nodes: vec![Node {
-                id: "s:4main7package18PackageDescription0C0Cvg".to_string(),
-                kind: NodeKind::Function,
-                name: "getter:package".to_string(),
-                file: PathBuf::from("Package.swift"),
-                span: Span {
-                    start: [0, 0],
-                    end: [0, 0],
-                },
-                visibility: Visibility::Public,
-                metadata: HashMap::new(),
-                role: None,
-                signature: None,
-                doc_comment: None,
-                module: None,
-            }],
-            edges: vec![Edge {
-                source: "s:4main7package18PackageDescription0C0Cvg".to_string(),
-                target: "external".to_string(),
-                kind: EdgeKind::Calls,
-                confidence: 1.0,
-                direction: None,
-                operation: None,
-                condition: None,
-                async_boundary: None,
-                provenance: vec![EdgeProvenance {
-                    file: PathBuf::from("Package.swift"),
-                    span: Span {
-                        start: [0, 0],
-                        end: [0, 0],
-                    },
-                    symbol_id: "s:4main7package18PackageDescription0C0Cvg".to_string(),
-                }],
-            }],
-            imports: vec![],
-        };
-
-        let stamped = stamp_module(result, &Some("Feature".to_string()));
-        assert_eq!(
-            stamped.nodes[0].id,
-            "s:4main7package18PackageDescription0C0Cvg@@module:Feature"
-        );
-        assert_eq!(
-            stamped.edges[0].source,
-            "s:4main7package18PackageDescription0C0Cvg@@module:Feature"
-        );
-        assert_eq!(
-            stamped.edges[0].provenance[0].symbol_id,
-            "s:4main7package18PackageDescription0C0Cvg@@module:Feature"
-        );
-        assert_eq!(stamped.nodes[0].module.as_deref(), Some("Feature"));
-    }
-
-    #[test]
-    fn normalize_graph_merges_duplicate_edges_and_provenance() {
-        let graph = Graph {
-            version: "0.1.0".to_string(),
-            nodes: vec![],
-            edges: vec![
-                Edge {
-                    source: "a".to_string(),
-                    target: "b".to_string(),
-                    kind: EdgeKind::Calls,
-                    confidence: 0.4,
-                    direction: None,
-                    operation: None,
-                    condition: None,
-                    async_boundary: None,
-                    provenance: vec![EdgeProvenance {
-                        file: PathBuf::from("a.swift"),
-                        span: Span {
-                            start: [1, 0],
-                            end: [1, 4],
-                        },
-                        symbol_id: "a".to_string(),
-                    }],
-                },
-                Edge {
-                    source: "a".to_string(),
-                    target: "b".to_string(),
-                    kind: EdgeKind::Calls,
-                    confidence: 0.9,
-                    direction: None,
-                    operation: None,
-                    condition: None,
-                    async_boundary: None,
-                    provenance: vec![EdgeProvenance {
-                        file: PathBuf::from("a.swift"),
-                        span: Span {
-                            start: [2, 0],
-                            end: [2, 4],
-                        },
-                        symbol_id: "a".to_string(),
-                    }],
-                },
-            ],
-        };
-
-        let normalized = normalize_graph(graph);
-        assert_eq!(normalized.edges.len(), 1);
-        assert_eq!(normalized.edges[0].confidence, 0.9);
-        assert_eq!(normalized.edges[0].provenance.len(), 2);
-    }
-
-    #[test]
-    fn normalize_graph_merges_duplicate_nodes_by_id() {
-        let graph = Graph {
-            version: "0.1.0".to_string(),
-            nodes: vec![
-                Node {
-                    id: "s:RoomPage.centerContentView".to_string(),
-                    kind: NodeKind::Property,
-                    name: "centerContentView".to_string(),
-                    file: PathBuf::from("RoomPage.swift"),
-                    span: Span {
-                        start: [0, 0],
-                        end: [0, 0],
-                    },
-                    visibility: Visibility::Private,
-                    metadata: std::collections::HashMap::new(),
-                    role: None,
-                    signature: None,
-                    doc_comment: None,
-                    module: None,
-                },
-                Node {
-                    id: "s:RoomPage.centerContentView".to_string(),
-                    kind: NodeKind::Property,
-                    name: "centerContentView".to_string(),
-                    file: PathBuf::from("RoomPage.swift"),
-                    span: Span {
-                        start: [10, 4],
-                        end: [10, 20],
-                    },
-                    visibility: Visibility::Public,
-                    metadata: std::collections::HashMap::new(),
-                    role: Some(grapha_core::graph::NodeRole::EntryPoint),
-                    signature: Some("var centerContentView: some View".to_string()),
-                    doc_comment: Some("helper".to_string()),
-                    module: Some("Room".to_string()),
-                },
-            ],
-            edges: vec![],
-        };
-
-        let normalized = normalize_graph(graph);
-        assert_eq!(normalized.nodes.len(), 1);
-        assert_eq!(normalized.nodes[0].visibility, Visibility::Public);
-        assert_eq!(
-            normalized.nodes[0].role,
-            Some(grapha_core::graph::NodeRole::EntryPoint)
-        );
-        assert_eq!(
-            normalized.nodes[0].signature.as_deref(),
-            Some("var centerContentView: some View")
-        );
-        assert_eq!(normalized.nodes[0].doc_comment.as_deref(), Some("helper"));
-        assert_eq!(normalized.nodes[0].module.as_deref(), Some("Room"));
-    }
 }

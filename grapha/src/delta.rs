@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
-use grapha_core::graph::{Edge, EdgeKind, FlowDirection, Graph, Node};
+pub use grapha_core::edge_fingerprint;
+use grapha_core::graph::{Edge, Graph, Node};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SyncMode {
@@ -148,87 +149,12 @@ impl<'a> GraphDelta<'a> {
     }
 }
 
-pub fn edge_fingerprint(edge: &Edge) -> String {
-    let mut hasher = Fnv1a64::default();
-    hasher.write_component(&edge.source);
-    hasher.write_component(&edge.target);
-    hasher.write_component(edge_kind_tag(edge.kind));
-    hasher.write_component(direction_tag(edge.direction.as_ref()));
-    hasher.write_component(edge.operation.as_deref().unwrap_or(""));
-    hasher.write_component(edge.condition.as_deref().unwrap_or(""));
-    hasher.write_component(bool_tag(edge.async_boundary));
-    format!("{:016x}", hasher.finish())
-}
-
-fn edge_kind_tag(kind: EdgeKind) -> &'static str {
-    match kind {
-        EdgeKind::Calls => "calls",
-        EdgeKind::Uses => "uses",
-        EdgeKind::Implements => "implements",
-        EdgeKind::Contains => "contains",
-        EdgeKind::TypeRef => "type_ref",
-        EdgeKind::Inherits => "inherits",
-        EdgeKind::Reads => "reads",
-        EdgeKind::Writes => "writes",
-        EdgeKind::Publishes => "publishes",
-        EdgeKind::Subscribes => "subscribes",
-    }
-}
-
-fn direction_tag(direction: Option<&FlowDirection>) -> &'static str {
-    match direction {
-        Some(FlowDirection::Read) => "read",
-        Some(FlowDirection::Write) => "write",
-        Some(FlowDirection::ReadWrite) => "read_write",
-        Some(FlowDirection::Pure) => "pure",
-        None => "",
-    }
-}
-
-fn bool_tag(value: Option<bool>) -> &'static str {
-    match value {
-        Some(true) => "1",
-        Some(false) => "0",
-        None => "",
-    }
-}
-
-#[derive(Default)]
-struct Fnv1a64 {
-    state: u64,
-}
-
-impl Fnv1a64 {
-    const OFFSET_BASIS: u64 = 0xcbf29ce484222325;
-    const PRIME: u64 = 0x100000001b3;
-
-    fn write_component(&mut self, value: &str) {
-        if self.state == 0 {
-            self.state = Self::OFFSET_BASIS;
-        }
-        for byte in value.as_bytes() {
-            self.state ^= u64::from(*byte);
-            self.state = self.state.wrapping_mul(Self::PRIME);
-        }
-        self.state ^= u64::from(0xff_u8);
-        self.state = self.state.wrapping_mul(Self::PRIME);
-    }
-
-    fn finish(self) -> u64 {
-        if self.state == 0 {
-            Self::OFFSET_BASIS
-        } else {
-            self.state
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
     use std::path::PathBuf;
 
-    use grapha_core::graph::{NodeKind, Span, Visibility};
+    use grapha_core::graph::{EdgeKind, FlowDirection, NodeKind, Span, Visibility};
 
     use super::*;
 

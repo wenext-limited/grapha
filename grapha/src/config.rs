@@ -6,9 +6,6 @@ use serde::Deserialize;
 pub struct GraphaConfig {
     #[serde(default)]
     pub classifiers: Vec<ClassifierRule>,
-    #[serde(default)]
-    #[allow(dead_code)]
-    pub entry_points: Vec<EntryPointRule>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -17,16 +14,6 @@ pub struct ClassifierRule {
     pub terminal: String,
     pub direction: String,
     pub operation: String,
-}
-
-#[allow(dead_code)]
-#[derive(Debug, Clone, Deserialize)]
-pub struct EntryPointRule {
-    pub language: String,
-    #[serde(default)]
-    pub pattern: Option<String>,
-    #[serde(default)]
-    pub attribute: Option<String>,
 }
 
 pub fn load_config(project_root: &Path) -> GraphaConfig {
@@ -50,7 +37,6 @@ mod tests {
     fn parse_empty_config() {
         let config: GraphaConfig = toml::from_str("").unwrap();
         assert!(config.classifiers.is_empty());
-        assert!(config.entry_points.is_empty());
     }
 
     #[test]
@@ -79,32 +65,10 @@ operation = "INSERT"
     }
 
     #[test]
-    fn parse_entry_point_rules() {
-        let toml_str = r#"
-[[entry_points]]
-language = "swift"
-attribute = "@main"
-
-[[entry_points]]
-language = "rust"
-pattern = "^main$"
-"#;
-        let config: GraphaConfig = toml::from_str(toml_str).unwrap();
-        assert_eq!(config.entry_points.len(), 2);
-        assert_eq!(config.entry_points[0].language, "swift");
-        assert_eq!(config.entry_points[0].attribute.as_deref(), Some("@main"));
-        assert!(config.entry_points[0].pattern.is_none());
-        assert_eq!(config.entry_points[1].language, "rust");
-        assert_eq!(config.entry_points[1].pattern.as_deref(), Some("^main$"));
-        assert!(config.entry_points[1].attribute.is_none());
-    }
-
-    #[test]
     fn load_missing_file_returns_default() {
         let dir = TempDir::new().unwrap();
         let config = load_config(dir.path());
         assert!(config.classifiers.is_empty());
-        assert!(config.entry_points.is_empty());
     }
 
     #[test]

@@ -32,12 +32,6 @@ public func indexstoreExtract(
     return UnsafeRawPointer(ptr)
 }
 
-@c(grapha_indexstore_close)
-public func indexstoreClose(_ handle: UnsafeMutableRawPointer) {
-    let key = Int(bitPattern: handle)
-    _ = _readers.withLock { $0.removeValue(forKey: key) }
-}
-
 // MARK: - SwiftSyntax
 
 @c(grapha_swiftsyntax_extract)

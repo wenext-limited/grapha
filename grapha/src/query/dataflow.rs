@@ -168,7 +168,7 @@ fn terminal_kind_for_effect(source: &Node, target: Option<&Node>) -> Option<Stri
             Some(NodeRole::Terminal { kind }) => Some(kind),
             _ => None,
         })
-        .or_else(|| match source.role.as_ref() {
+        .or(match source.role.as_ref() {
             Some(NodeRole::Terminal { kind }) => Some(kind),
             _ => None,
         })

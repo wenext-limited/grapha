@@ -197,7 +197,7 @@ fn build_catalog_snapshot(
     }
 
     let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
-    let files = crate::discover::discover_files(&root, &["xcstrings"])?;
+    let files = grapha_core::discover::discover_files(&root, &["xcstrings".to_string()])?;
     let mut records = Vec::new();
     let mut warnings = Vec::new();
     for file in files {
@@ -389,7 +389,7 @@ fn normalized_components(path: &Path) -> Vec<OsString> {
         .collect()
 }
 
-pub fn localization_usage_nodes<'a>(graph: &'a Graph) -> Vec<&'a Node> {
+pub fn localization_usage_nodes(graph: &Graph) -> Vec<&Node> {
     graph
         .nodes
         .iter()
@@ -426,7 +426,7 @@ pub fn parse_wrapper_binding(node: &Node) -> Option<LocalizationWrapperBinding> 
     })
 }
 
-pub fn edges_by_source<'a>(graph: &'a Graph) -> HashMap<&'a str, Vec<&'a Edge>> {
+pub fn edges_by_source(graph: &Graph) -> HashMap<&str, Vec<&Edge>> {
     let mut map: HashMap<&str, Vec<&Edge>> = HashMap::new();
     for edge in &graph.edges {
         map.entry(edge.source.as_str()).or_default().push(edge);
@@ -434,7 +434,7 @@ pub fn edges_by_source<'a>(graph: &'a Graph) -> HashMap<&'a str, Vec<&'a Edge>> 
     map
 }
 
-pub fn node_index<'a>(graph: &'a Graph) -> HashMap<&'a str, &'a Node> {
+pub fn node_index(graph: &Graph) -> HashMap<&str, &Node> {
     graph
         .nodes
         .iter()

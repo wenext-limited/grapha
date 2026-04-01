@@ -121,7 +121,7 @@ impl PathMergeNode {
             .into_iter()
             .map(|(child_label, child)| child.into_tree_node(child_label))
             .collect();
-        children.extend(self.notes.into_iter().map(|note| TreeNode::leaf(note)));
+        children.extend(self.notes.into_iter().map(TreeNode::leaf));
         TreeNode::branch(label, children)
     }
 
@@ -330,11 +330,6 @@ fn reverse_leaf_label(entry: &AffectedEntry, options: RenderOptions) -> String {
     )
 }
 
-#[allow(dead_code)]
-pub fn render_context(result: &ContextResult) -> String {
-    render_context_with_options(result, RenderOptions::plain())
-}
-
 pub fn render_context_with_options(result: &ContextResult, options: RenderOptions) -> String {
     let mut children = Vec::new();
 
@@ -363,11 +358,6 @@ pub fn render_context_with_options(result: &ContextResult, options: RenderOption
     ))
 }
 
-#[allow(dead_code)]
-pub fn render_entries(result: &EntriesResult) -> String {
-    render_entries_with_options(result, RenderOptions::plain())
-}
-
 pub fn render_entries_with_options(result: &EntriesResult, options: RenderOptions) -> String {
     let children = sorted_symbol_refs(&result.entries)
         .into_iter()
@@ -378,11 +368,6 @@ pub fn render_entries_with_options(result: &EntriesResult, options: RenderOption
         format_section_count("entry points", result.total, options),
         children,
     ))
-}
-
-#[allow(dead_code)]
-pub fn render_localize(result: &LocalizeResult) -> String {
-    render_localize_with_options(result, RenderOptions::plain())
 }
 
 pub fn render_localize_with_options(result: &LocalizeResult, options: RenderOptions) -> String {
@@ -496,11 +481,6 @@ pub fn render_localize_with_options(result: &LocalizeResult, options: RenderOpti
     ))
 }
 
-#[allow(dead_code)]
-pub fn render_usages(result: &UsagesResult) -> String {
-    render_usages_with_options(result, RenderOptions::plain())
-}
-
 pub fn render_usages_with_options(result: &UsagesResult, options: RenderOptions) -> String {
     let mut children = Vec::new();
     children.push(TreeNode::leaf(format_summary(
@@ -562,11 +542,6 @@ pub fn render_usages_with_options(result: &UsagesResult, options: RenderOptions)
         Palette::new(options).section_header(format!("usages for {}", result.query.key)),
         children,
     ))
-}
-
-#[allow(dead_code)]
-pub fn render_trace(result: &TraceResult) -> String {
-    render_trace_with_options(result, RenderOptions::plain())
 }
 
 pub fn render_trace_with_options(result: &TraceResult, options: RenderOptions) -> String {
@@ -719,11 +694,6 @@ fn render_dataflow_children(
     children
 }
 
-#[allow(dead_code)]
-pub fn render_dataflow(result: &DataflowResult) -> String {
-    render_dataflow_with_options(result, RenderOptions::plain())
-}
-
 pub fn render_dataflow_with_options(result: &DataflowResult, options: RenderOptions) -> String {
     let node_index: BTreeMap<String, DataflowNode> = result
         .nodes
@@ -774,11 +744,6 @@ pub fn render_dataflow_with_options(result: &DataflowResult, options: RenderOpti
     render_tree(&root)
 }
 
-#[allow(dead_code)]
-pub fn render_reverse(result: &ReverseResult) -> String {
-    render_reverse_with_options(result, RenderOptions::plain())
-}
-
 pub fn render_reverse_with_options(result: &ReverseResult, options: RenderOptions) -> String {
     let mut tree = PathMergeNode::default();
     let palette = Palette::new(options);
@@ -809,11 +774,6 @@ pub fn render_reverse_with_options(result: &ReverseResult, options: RenderOption
     );
 
     render_tree(&root)
-}
-
-#[allow(dead_code)]
-pub fn render_impact(result: &ImpactResult) -> String {
-    render_impact_with_options(result, RenderOptions::plain())
 }
 
 pub fn render_impact_with_options(result: &ImpactResult, options: RenderOptions) -> String {
@@ -912,7 +872,7 @@ mod tests {
             type_refs: Vec::new(),
         };
 
-        let rendered = render_context(&result);
+        let rendered = render_context_with_options(&result, RenderOptions::plain());
         assert!(rendered.contains("helper [function] (main.rs)"));
         assert!(rendered.contains("callers (1)"));
         assert!(rendered.contains("main [function] (main.rs)"));
@@ -959,7 +919,7 @@ mod tests {
             type_refs: Vec::new(),
         };
 
-        let rendered = render_context(&result);
+        let rendered = render_context_with_options(&result, RenderOptions::plain());
         assert!(rendered.contains("contains (1)"));
         assert!(rendered.contains("├── contains (1)"));
         assert!(rendered.contains("│   └── VStack [view] (ContentView.swift)"));
@@ -979,7 +939,7 @@ mod tests {
             total: 2,
         };
 
-        let rendered = render_entries(&result);
+        let rendered = render_entries_with_options(&result, RenderOptions::plain());
         assert!(rendered.contains("entry points (2)"));
         assert!(rendered.contains("boot [function] (boot.rs)"));
         assert!(rendered.contains("main [function] (main.rs)"));
@@ -1020,7 +980,7 @@ mod tests {
             entry_ref: symbol_ref("main", NodeKind::Function, "main.rs"),
         };
 
-        let rendered = render_trace(&result);
+        let rendered = render_trace_with_options(&result, RenderOptions::plain());
         assert!(rendered.contains("main [function] (main.rs)"));
         assert!(rendered.contains("summary: flows=2, reads=0, writes=2, async_crossings=1"));
         assert!(rendered.contains("service"));
@@ -1050,7 +1010,7 @@ mod tests {
             target_ref: symbol_ref("db", NodeKind::Function, "target.rs"),
         };
 
-        let rendered = render_reverse(&result);
+        let rendered = render_reverse_with_options(&result, RenderOptions::plain());
         assert!(rendered.contains("db [function] (target.rs)"));
         assert!(rendered.contains("affected entries (2)"));
         assert!(rendered.contains("service"));
@@ -1081,7 +1041,7 @@ mod tests {
             tree,
         };
 
-        let rendered = render_impact(&result);
+        let rendered = render_impact_with_options(&result, RenderOptions::plain());
         assert!(rendered.contains("source [function] (core.rs)"));
         assert!(rendered.contains("summary: depth_1=1, depth_2=1, depth_3_plus=0, total=2"));
         assert!(rendered.contains("dependents (2)"));
@@ -1103,7 +1063,7 @@ mod tests {
             type_refs: Vec::new(),
         };
 
-        let plain = render_context(&result);
+        let plain = render_context_with_options(&result, RenderOptions::plain());
         let rendered = render_context_with_options(&result, RenderOptions::color());
 
         assert!(rendered.contains("\x1b[1;97mhelper\x1b[0m"));

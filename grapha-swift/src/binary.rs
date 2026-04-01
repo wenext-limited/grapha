@@ -95,7 +95,7 @@ fn read_u32(buf: &[u8], offset: usize) -> u32 {
     ])
 }
 
-fn read_str<'a>(string_table: &'a [u8], offset: u32, len: u32) -> Option<&'a str> {
+fn read_str(string_table: &[u8], offset: u32, len: u32) -> Option<&str> {
     let start = offset as usize;
     let end = start.checked_add(len as usize)?;
     let bytes = string_table.get(start..end)?;
@@ -245,30 +245,25 @@ mod tests {
     }
 
     fn make_packed_node(
-        id_off: u32,
-        id_len: u32,
-        name_off: u32,
-        name_len: u32,
-        file_off: u32,
-        file_len: u32,
-        module_off: u32,
-        module_len: u32,
-        line: u32,
-        col: u32,
+        id: [u32; 2],
+        name: [u32; 2],
+        file: [u32; 2],
+        module: [u32; 2],
+        position: [u32; 2],
         kind: u8,
         visibility: u8,
     ) -> Vec<u8> {
         let mut chunk = Vec::with_capacity(PACKED_NODE_SIZE);
-        chunk.extend_from_slice(&id_off.to_le_bytes());
-        chunk.extend_from_slice(&id_len.to_le_bytes());
-        chunk.extend_from_slice(&name_off.to_le_bytes());
-        chunk.extend_from_slice(&name_len.to_le_bytes());
-        chunk.extend_from_slice(&file_off.to_le_bytes());
-        chunk.extend_from_slice(&file_len.to_le_bytes());
-        chunk.extend_from_slice(&module_off.to_le_bytes());
-        chunk.extend_from_slice(&module_len.to_le_bytes());
-        chunk.extend_from_slice(&line.to_le_bytes());
-        chunk.extend_from_slice(&col.to_le_bytes());
+        chunk.extend_from_slice(&id[0].to_le_bytes());
+        chunk.extend_from_slice(&id[1].to_le_bytes());
+        chunk.extend_from_slice(&name[0].to_le_bytes());
+        chunk.extend_from_slice(&name[1].to_le_bytes());
+        chunk.extend_from_slice(&file[0].to_le_bytes());
+        chunk.extend_from_slice(&file[1].to_le_bytes());
+        chunk.extend_from_slice(&module[0].to_le_bytes());
+        chunk.extend_from_slice(&module[1].to_le_bytes());
+        chunk.extend_from_slice(&position[0].to_le_bytes());
+        chunk.extend_from_slice(&position[1].to_le_bytes());
         chunk.push(kind);
         chunk.push(visibility);
         chunk.extend_from_slice(&[0u8; 2]); // pad
@@ -332,13 +327,13 @@ mod tests {
         let string_table = b"s::MyApp::foofoo/src/main.swiftMyApps::MyApp::bar";
 
         let node = make_packed_node(
-            0, 13, // id: "s::MyApp::foo"
-            13, 3, // name: "foo"
-            16, 15, // file: "/src/main.swift"
-            31, 5, // module: "MyApp"
-            42, 10, // line 42, col 10
-            0,  // kind: Function
-            0,  // visibility: Public
+            [0, 13],  // id: "s::MyApp::foo"
+            [13, 3],  // name: "foo"
+            [16, 15], // file: "/src/main.swift"
+            [31, 5],  // module: "MyApp"
+            [42, 10], // line 42, col 10
+            0,        // kind: Function
+            0,        // visibility: Public
         );
 
         let edge = make_packed_edge(
@@ -374,8 +369,13 @@ mod tests {
     fn test_string_out_of_bounds_returns_none() {
         // Node references string at offset 999 which is beyond the string table
         let node = make_packed_node(
-            999, 5, // id offset way out of bounds
-            0, 3, 0, 3, NO_MODULE, 0, 1, 0, 0, 0,
+            [999, 5], // id offset way out of bounds
+            [0, 3],
+            [0, 3],
+            [NO_MODULE, 0],
+            [1, 0],
+            0,
+            0,
         );
 
         let buf = build_buffer(&[node], &[], b"abc");

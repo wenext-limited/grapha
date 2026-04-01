@@ -1,6 +1,9 @@
 mod binary;
 mod bridge;
+mod classifier;
+mod graph_pass;
 mod indexstore;
+mod module_discovery;
 mod swiftsyntax;
 mod treesitter;
 
@@ -9,9 +12,64 @@ use std::sync::OnceLock;
 
 pub use treesitter::SwiftExtractor;
 
-use grapha_core::{ExtractionResult, LanguageExtractor};
+use grapha_core::{
+    Classifier, ExtractionResult, FileContext, GraphPass, LanguageExtractor, LanguagePlugin,
+    LanguageRegistry, ModuleMap, ProjectContext,
+};
 
 static INDEX_STORE_PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
+
+pub struct SwiftPlugin;
+
+impl LanguagePlugin for SwiftPlugin {
+    fn id(&self) -> &'static str {
+        "swift"
+    }
+
+    fn extensions(&self) -> &'static [&'static str] {
+        &["swift"]
+    }
+
+    fn prepare_project(&self, context: &ProjectContext) -> anyhow::Result<()> {
+        init_index_store(&context.project_root);
+        Ok(())
+    }
+
+    fn discover_modules(&self, context: &ProjectContext) -> anyhow::Result<ModuleMap> {
+        Ok(module_discovery::discover_swift_modules(
+            &context.project_root,
+        ))
+    }
+
+    fn extract(&self, source: &[u8], context: &FileContext) -> anyhow::Result<ExtractionResult> {
+        extract_swift(
+            source,
+            &context.relative_path,
+            None,
+            Some(&context.project_root),
+        )
+    }
+
+    fn stamp_module(
+        &self,
+        result: ExtractionResult,
+        module_name: Option<&str>,
+    ) -> ExtractionResult {
+        stamp_swift_module(result, module_name)
+    }
+
+    fn classifiers(&self) -> Vec<Box<dyn Classifier>> {
+        vec![Box::new(classifier::SwiftClassifier::new())]
+    }
+
+    fn graph_passes(&self) -> Vec<Box<dyn GraphPass>> {
+        vec![Box::new(graph_pass::SwiftGraphPass)]
+    }
+}
+
+pub fn register_builtin(registry: &mut LanguageRegistry) -> anyhow::Result<()> {
+    registry.register(SwiftPlugin)
+}
 
 /// Auto-discover the Xcode index store for a project.
 /// Walks up from the given path looking for .xcodeproj/.xcworkspace,
@@ -105,6 +163,63 @@ pub fn index_store_path() -> Option<&'static Path> {
     INDEX_STORE_PATH.get().and_then(|p| p.as_deref())
 }
 
+fn stamp_swift_module(result: ExtractionResult, module_name: Option<&str>) -> ExtractionResult {
+    let Some(module_name) = module_name else {
+        return result;
+    };
+
+    let manifest_id_remap: std::collections::HashMap<String, String> = result
+        .nodes
+        .iter()
+        .filter(|node| {
+            node.file.file_name().and_then(|name| name.to_str()) == Some("Package.swift")
+        })
+        .map(|node| {
+            (
+                node.id.clone(),
+                format!("{}@@module:{}", node.id, module_name),
+            )
+        })
+        .collect();
+
+    let nodes = result
+        .nodes
+        .into_iter()
+        .map(|mut node| {
+            node.module = Some(module_name.to_string());
+            if let Some(remapped_id) = manifest_id_remap.get(&node.id) {
+                node.id = remapped_id.clone();
+            }
+            node
+        })
+        .collect();
+
+    let edges = result
+        .edges
+        .into_iter()
+        .map(|mut edge| {
+            if let Some(remapped_id) = manifest_id_remap.get(&edge.source) {
+                edge.source = remapped_id.clone();
+            }
+            if let Some(remapped_id) = manifest_id_remap.get(&edge.target) {
+                edge.target = remapped_id.clone();
+            }
+            for provenance in &mut edge.provenance {
+                if let Some(remapped_id) = manifest_id_remap.get(&provenance.symbol_id) {
+                    provenance.symbol_id = remapped_id.clone();
+                }
+            }
+            edge
+        })
+        .collect();
+
+    ExtractionResult {
+        nodes,
+        edges,
+        imports: result.imports,
+    }
+}
+
 /// Extract Swift source code with waterfall strategy:
 /// 1. Xcode index store (confidence 1.0)
 /// 2. SwiftSyntax bridge (confidence 0.9)
@@ -159,4 +274,69 @@ pub fn extract_swift(
     let mut result = extractor.extract(source, file_path)?;
     let _ = treesitter::enrich_localization_metadata(source, file_path, &mut result);
     Ok(result)
+}
+
+#[cfg(test)]
+mod plugin_tests {
+    use super::stamp_swift_module;
+    use grapha_core::ExtractionResult;
+    use grapha_core::graph::{Edge, EdgeKind, EdgeProvenance, Node, NodeKind, Span, Visibility};
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    #[test]
+    fn stamp_module_namespaces_package_manifest_ids() {
+        let result = ExtractionResult {
+            nodes: vec![Node {
+                id: "s:4main7package18PackageDescription0C0Cvg".to_string(),
+                kind: NodeKind::Function,
+                name: "getter:package".to_string(),
+                file: PathBuf::from("Package.swift"),
+                span: Span {
+                    start: [0, 0],
+                    end: [0, 0],
+                },
+                visibility: Visibility::Public,
+                metadata: HashMap::new(),
+                role: None,
+                signature: None,
+                doc_comment: None,
+                module: None,
+            }],
+            edges: vec![Edge {
+                source: "s:4main7package18PackageDescription0C0Cvg".to_string(),
+                target: "external".to_string(),
+                kind: EdgeKind::Calls,
+                confidence: 1.0,
+                direction: None,
+                operation: None,
+                condition: None,
+                async_boundary: None,
+                provenance: vec![EdgeProvenance {
+                    file: PathBuf::from("Package.swift"),
+                    span: Span {
+                        start: [0, 0],
+                        end: [0, 0],
+                    },
+                    symbol_id: "s:4main7package18PackageDescription0C0Cvg".to_string(),
+                }],
+            }],
+            imports: vec![],
+        };
+
+        let stamped = stamp_swift_module(result, Some("Feature"));
+        assert_eq!(
+            stamped.nodes[0].id,
+            "s:4main7package18PackageDescription0C0Cvg@@module:Feature"
+        );
+        assert_eq!(
+            stamped.edges[0].source,
+            "s:4main7package18PackageDescription0C0Cvg@@module:Feature"
+        );
+        assert_eq!(
+            stamped.edges[0].provenance[0].symbol_id,
+            "s:4main7package18PackageDescription0C0Cvg@@module:Feature"
+        );
+        assert_eq!(stamped.nodes[0].module.as_deref(), Some("Feature"));
+    }
 }

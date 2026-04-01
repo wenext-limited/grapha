@@ -9,6 +9,12 @@ impl RustClassifier {
     }
 }
 
+impl Default for RustClassifier {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Classifier for RustClassifier {
     fn classify(&self, call_target: &str, _context: &ClassifyContext) -> Option<Classification> {
         classify_rust(call_target)

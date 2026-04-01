@@ -1086,10 +1086,10 @@ fn collect_doc_comments(
 ) {
     match node.kind() {
         "class_declaration" | "protocol_declaration" => {
-            if let Some(name) = type_identifier_text(node, source) {
-                if let Some(doc) = extract_swift_doc_comment(node, source) {
-                    out.insert((name, node.start_position().row + 1), doc);
-                }
+            if let Some(name) = type_identifier_text(node, source)
+                && let Some(doc) = extract_swift_doc_comment(node, source)
+            {
+                out.insert((name, node.start_position().row + 1), doc);
             }
         }
         "function_declaration"
@@ -1103,17 +1103,17 @@ fn collect_doc_comments(
             } else {
                 simple_identifier_text(node, source)
             };
-            if let Some(name) = name {
-                if let Some(doc) = extract_swift_doc_comment(node, source) {
-                    out.insert((name, node.start_position().row + 1), doc);
-                }
+            if let Some(name) = name
+                && let Some(doc) = extract_swift_doc_comment(node, source)
+            {
+                out.insert((name, node.start_position().row + 1), doc);
             }
         }
         "property_declaration" => {
-            if let Some(name) = find_pattern_name(node, source) {
-                if let Some(doc) = extract_swift_doc_comment(node, source) {
-                    out.insert((name, node.start_position().row + 1), doc);
-                }
+            if let Some(name) = find_pattern_name(node, source)
+                && let Some(doc) = extract_swift_doc_comment(node, source)
+            {
+                out.insert((name, node.start_position().row + 1), doc);
             }
         }
         _ => {}

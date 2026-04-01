@@ -700,6 +700,7 @@ dependencies = [
  "clap",
  "git2",
  "grapha-core",
+ "grapha-rust",
  "grapha-swift",
  "ignore",
  "indicatif",
@@ -716,8 +717,6 @@ dependencies = [
  "tokio",
  "toml",
  "tower-http",
- "tree-sitter",
- "tree-sitter-rust",
  "urlencoding",
 ]
 
@@ -726,9 +725,23 @@ name = "grapha-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "ignore",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
+]
+
+[[package]]
+name = "grapha-rust"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "grapha-core",
+ "tempfile",
+ "toml",
+ "tree-sitter",
+ "tree-sitter-rust",
 ]
 
 [[package]]
@@ -741,6 +754,7 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
+ "tempfile",
  "tree-sitter",
  "tree-sitter-swift",
 ]
