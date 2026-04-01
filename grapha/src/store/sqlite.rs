@@ -310,12 +310,6 @@ impl SqliteStore {
     }
 }
 
-/// Serialize a serde enum value to its snake_case string form.
-fn enum_to_str<T: serde::Serialize>(value: &T) -> anyhow::Result<String> {
-    let json = serde_json::to_string(value)?;
-    Ok(json.trim_matches('"').to_string())
-}
-
 // Direct enum → &str conversions — avoids ~1M serde_json round-trips during save.
 
 fn node_kind_str(k: &NodeKind) -> &'static str {

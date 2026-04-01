@@ -11,6 +11,7 @@ use crate::search;
 pub struct McpState {
     pub graph: Graph,
     pub search_index: Index,
+    #[allow(dead_code)] // Will be used by index_project tool
     pub store_path: PathBuf,
 }
 

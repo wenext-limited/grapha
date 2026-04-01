@@ -11,19 +11,10 @@ use crate::query::{
     trace::TraceResult, usages::UsagesResult,
 };
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct RenderOptions {
     color_enabled: bool,
     pub fields: FieldSet,
-}
-
-impl Default for RenderOptions {
-    fn default() -> Self {
-        Self {
-            color_enabled: false,
-            fields: FieldSet::default(),
-        }
-    }
 }
 
 impl RenderOptions {

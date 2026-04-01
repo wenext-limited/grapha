@@ -65,8 +65,3 @@ impl<'a> LineIndex<'a> {
         }
     }
 }
-
-/// Convenience function for single-call usage (tests).
-pub fn extract_snippet(source: &str, span: &Span, max_len: usize) -> Option<String> {
-    LineIndex::new(source).extract_snippet(span, max_len)
-}

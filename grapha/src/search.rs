@@ -28,6 +28,7 @@ pub struct SearchResult {
 pub struct SearchOptions {
     pub kind: Option<String>,
     pub module: Option<String>,
+    #[allow(dead_code)] // Populated by CLI/MCP; filtering not yet implemented
     pub file_glob: Option<String>,
     pub role: Option<String>,
     pub fuzzy: bool,
@@ -216,6 +217,7 @@ fn resolve_fields(index: &Index) -> Result<SearchFields> {
     })
 }
 
+#[allow(dead_code)] // Public backward-compat wrapper
 pub fn search(index: &Index, query_str: &str, limit: usize) -> Result<Vec<SearchResult>> {
     search_filtered(index, query_str, limit, &SearchOptions::default())
 }

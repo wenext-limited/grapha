@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize)]
 pub struct JsonRpcRequest {
+    #[allow(dead_code)] // Required by JSON-RPC protocol
     pub jsonrpc: String,
     pub id: Option<serde_json::Value>,
     pub method: String,

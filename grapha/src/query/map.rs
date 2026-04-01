@@ -20,10 +20,8 @@ pub fn file_map(
     for node in &graph.nodes {
         let module = node.module.as_deref().unwrap_or("(unknown)").to_string();
 
-        if let Some(filter) = module_filter {
-            if module != filter {
-                continue;
-            }
+        if let Some(filter) = module_filter && module != filter {
+            continue;
         }
 
         let file_path = node.file.to_string_lossy();

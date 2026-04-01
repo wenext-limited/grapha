@@ -791,13 +791,12 @@ fn handle_index(
         load_existing_graph(&format, &store_path)?
     };
 
-    let delta = if full_rebuild || previous_graph.is_none() {
+    let delta = if full_rebuild {
         None
     } else {
-        Some(delta::GraphDelta::between(
-            previous_graph.as_ref().unwrap(),
-            &graph,
-        ))
+        previous_graph
+            .as_ref()
+            .map(|prev| delta::GraphDelta::between(prev, &graph))
     };
 
     let search_index_path = store_path.join("search_index");

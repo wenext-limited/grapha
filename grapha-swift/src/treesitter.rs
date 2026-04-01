@@ -1064,6 +1064,7 @@ fn extract_swift_signature(node: tree_sitter::Node, source: &[u8]) -> Option<Str
 ///
 /// Index store lines are **1-based**; tree-sitter rows are **0-based**, so we
 /// compare with `row + 1`.
+#[cfg(test)]
 pub fn enrich_doc_comments(source: &[u8], result: &mut ExtractionResult) -> anyhow::Result<()> {
     let tree = parse_swift(source)?;
     enrich_doc_comments_with_tree(source, &tree, result)
@@ -1601,10 +1602,6 @@ fn same_owner_member_id(owner_id: &str, name: &str) -> Option<String> {
     Some(format!("{owner_prefix}::{name}"))
 }
 
-fn dependency_target_id(owner_id: &str, file: &str, module_path: &[String], name: &str) -> String {
-    same_owner_member_id(owner_id, name).unwrap_or_else(|| make_id(file, module_path, name))
-}
-
 fn enclosing_owner_type_name(node: tree_sitter::Node, source: &[u8]) -> Option<String> {
     let mut current = Some(node);
     while let Some(cursor) = current {
@@ -1683,7 +1680,7 @@ fn emit_dependency_read(
     let target_id = same_owner_member_id(owner_id, &name).unwrap_or_else(|| {
         if let Some(ref owner) = owner_name {
             // Scope to the enclosing type: "File.swift::OwnerType::propertyName"
-            make_id(file, &[owner.clone()], &name)
+            make_id(file, std::slice::from_ref(owner), &name)
         } else {
             make_id(file, module_path, &name)
         }
@@ -3081,6 +3078,7 @@ pub fn enrich_localization_metadata_with_tree(
     Ok(())
 }
 
+#[cfg(test)]
 pub fn enrich_swiftui_structure(
     source: &[u8],
     file_path: &Path,
