@@ -26,15 +26,18 @@ private func str(_ ref: indexstore_string_ref_t) -> String {
 
 // MARK: - Extracted Data
 
+/// Node data collected from index store. Strings use interned offsets
+/// to avoid redundant copies — the raw string is interned once into the
+/// string table, and only the (offset, length) pair is stored here.
 private struct ExtractedNode {
-    let id: String
+    let id: String      // USR — also used as dict key (shared via CoW)
     let kind: UInt8
     let name: String
-    let file: String
+    let file: String    // shared across all nodes in same file (CoW)
     let line: UInt32
     let col: UInt32
     let visibility: UInt8
-    let module: String?
+    let module: String? // shared across all nodes in same file (CoW)
 }
 
 private struct ExtractedEdge: Hashable {
@@ -57,15 +60,19 @@ private struct ExtractedEdge: Hashable {
 // MARK: - Callback Context Types
 
 private final class OccCollector: @unchecked Sendable {
-    var nodes: [String: ExtractedNode] = [:]
+    var nodes: [String: ExtractedNode]
     /// Set gives O(1) insertion with automatic deduplication (no post-pass needed).
-    var edges: Set<ExtractedEdge> = []
+    var edges: Set<ExtractedEdge>
     let fileName: String
     let moduleName: String?
 
     init(fileName: String, moduleName: String?) {
         self.fileName = fileName
         self.moduleName = moduleName
+        // Pre-size to avoid rehashing during collection.
+        // Typical Swift file: ~50-100 symbols, ~200-500 edges.
+        self.nodes = Dictionary(minimumCapacity: 128)
+        self.edges = Set(minimumCapacity: 512)
     }
 }
 
@@ -379,26 +386,36 @@ private func buildBinaryBuffer(
     edges: Set<ExtractedEdge>
 ) -> (UnsafeMutableRawPointer, UInt32) {
     // Phase 1: build string table with deduplication
+    let estimatedStrings = nodes.count * 3 + edges.count * 2
     var stringTable = Data()
-    var stringIndex: [String: (UInt32, UInt32)] = [:]
+    stringTable.reserveCapacity(estimatedStrings * 32) // avg ~32 bytes per string
+    var stringIndex: [String: (UInt32, UInt32)] = Dictionary(minimumCapacity: estimatedStrings)
 
     func intern(_ s: String) -> (UInt32, UInt32) {
         if let existing = stringIndex[s] { return existing }
         let offset = UInt32(stringTable.count)
-        var len: UInt32 = 0
-        // Write UTF-8 bytes directly without intermediate Array allocation
-        s.withCString { ptr in
-            let byteCount = strlen(ptr)
-            stringTable.append(UnsafeBufferPointer(start: ptr, count: byteCount))
-            len = UInt32(byteCount)
-        }
-        let entry = (offset, len)
+        // Use contiguous UTF-8 buffer directly — avoids copy for native Swift strings (Swift 5+)
+        let len: Int = s.utf8.withContiguousStorageIfAvailable { buf in
+            stringTable.append(buf)
+            return buf.count
+        } ?? {
+            // Fallback: copy via withUTF8
+            var count = 0
+            var copy = s
+            copy.withUTF8 { buf in
+                stringTable.append(buf)
+                count = buf.count
+            }
+            return count
+        }()
+        let entry = (offset, UInt32(len))
         stringIndex[s] = entry
         return entry
     }
 
     // Pre-intern all strings (nodes first, then edges reuse via dedup)
     var nodeRefs: [(id: (UInt32, UInt32), name: (UInt32, UInt32), file: (UInt32, UInt32), module: (UInt32, UInt32)?)] = []
+    nodeRefs.reserveCapacity(nodes.count)
     for n in nodes {
         let idRef = intern(n.id)
         let nameRef = intern(n.name)
