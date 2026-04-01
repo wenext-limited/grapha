@@ -6,7 +6,7 @@ Blazingly fast code intelligence for LLM agents and developer tooling.
 
 Grapha transforms source code into a normalized, graph-based representation with compiler-grade accuracy. For Swift, it reads Xcode's pre-built index store via a binary FFI bridge for fully type-resolved symbol graphs, then falls back to SwiftSyntax and finally tree-sitter for instant parsing without a build. The resulting graph provides persistence, incremental search/index sync, dataflow tracing, semantic effect graphs, and impact analysis — giving agents and developers structured access to codebases at scale.
 
-> **1,991 Swift files — 123K nodes, 766K edges — indexed in 6 seconds.**
+> **1,991 Swift files — 131K nodes, 787K edges — indexed in 9.7 seconds.**
 
 ## Performance
 
@@ -14,39 +14,48 @@ Tested on a production iOS app (1,991 Swift files, ~300K lines):
 
 | Phase | Time |
 |-------|------|
-| Extraction (index store + binary FFI) | **1.8s** |
-| Merge (module-aware cross-file resolution) | 0.15s |
-| Classification (entry points + terminals) | 0.97s |
-| SQLite persistence (889K rows) | 2.1s |
-| Search index (BM25 via tantivy) | 0.8s |
-| **Total** | **6.0s** |
+| Extraction (index store + tree-sitter enrichment) | **3.6s** |
+| Merge (module-aware cross-file resolution) | 0.3s |
+| Classification (entry points + terminals) | 1.5s |
+| SQLite persistence (deferred index, 918K rows) | 3.1s |
+| Search index (BM25 via tantivy, 7 fields) | 0.7s |
+| **Total** | **9.7s** |
 
 | Metric | Value |
 |--------|-------|
-| Nodes | 123,323 |
-| Edges (compiler-resolved) | 766,427 |
+| Nodes (with source snippets) | 131,242 |
+| Edges (compiler-resolved) | 787,021 |
 | Entry points (auto-detected) | 2,985 |
-| Terminal operations | 10,548 |
+| Terminal operations | 11,148 |
 
 **Why it's fast:**
-- **Zero-parse index-store FFI** — the index-store bridge returns packed structs + a deduplicated string table. Rust reads with pointer arithmetic, no serde on the compiler-grade path.
-- **Index store reuse** — reads Xcode's already-compiled symbol database. No re-parsing, no re-resolving.
-- **Fast fallback tiers** — when no index is available, SwiftSyntax runs through the same bridge and tree-sitter remains the last-resort parser.
-- **Deferred indexing** — SQLite indexes built after bulk insert, not during.
-- **Parallel extraction** — rayon-powered concurrent file processing.
+- **Zero-parse index-store FFI** — the bridge returns packed structs + a deduplicated string table. Rust reads with pointer arithmetic, no serde on the compiler-grade path.
+- **Lock-free parallel extraction** — each rayon thread gets its own extraction context via C callback pointers, no global mutex.
+- **Single tree-sitter parse** — one parse shared across doc comment, SwiftUI structure, and localization enrichment passes.
+- **Marker-based skip** — files without SwiftUI/localization markers skip expensive enrichment entirely (byte-level scan, not AST).
+- **Deferred indexing** — SQLite primary keys and indexes built after bulk insert, not during.
+- **USR-scoped edge resolution** — reads edges resolved via USR type prefix matching, eliminating false positives without post-processing.
+
+Use `grapha index --timing` to see a per-phase breakdown including thread-summed extraction times.
 
 ## Features
 
 - **Compiler-grade accuracy** — reads Xcode's pre-built index store for 100% type-resolved call graphs (Swift). Falls back to SwiftSyntax, then tree-sitter, for instant parsing without a build.
 - **Incremental indexing** — SQLite storage and Tantivy search sync incrementally by default. Use `grapha index --full-rebuild` to force a cold rebuild.
+- **Advanced search** — BM25 full-text search with filters (`--kind`, `--module`, `--role`, `--fuzzy`) and context mode (`--context`) that inlines source snippets and relationships.
+- **Source snippets** — each symbol stores a truncated source snippet (up to 600 chars) for token-efficient agent browsing without reading full files.
 - **Dataflow tracing** — trace forward from entry points to terminal operations (network, persistence, cache), or backward from any symbol to affected entry points.
 - **Semantic dataflow graph** — derive a deduplicated effect graph from a symbol with `grapha flow graph`, including reads, writes, publishes, subscribes, and terminal side effects.
 - **Impact analysis** — BFS blast radius: "if I change this function, what breaks?"
-- **Provenance-aware change detection** — edges carry source spans, so `grapha repo changes` can attribute method-body edits even when declaration spans stay fixed.
+- **Output customization** — `--fields` flag controls which columns appear (file, id, module, span, snippet, visibility, signature, role). Configurable defaults in `grapha.toml`.
+- **Cross-module analysis** — include external local repos via `[[external]]` config for cross-repo edge resolution and impact analysis.
+- **File map** — `grapha repo map` shows a directory-level overview of symbol counts per module for project orientation.
+- **MCP server** — `grapha serve --mcp` exposes 6 tools over JSON-RPC stdio for AI agent integration (search, context, impact, trace, file map, index).
 - **Entry point detection** — auto-detects SwiftUI Views, `@Observable` classes, `fn main()`, `#[test]` functions.
 - **Terminal classification** — recognizes network calls, persistence (GRDB, CoreData), cache (Kingfisher), analytics, and more. Extensible via `grapha.toml`.
-- **Cross-module resolution** — import-guided disambiguation with confidence scoring. Module-aware merging for multi-package projects.
+- **Provenance-aware change detection** — edges carry source spans, so `grapha repo changes` can attribute method-body edits even when declaration spans stay fixed.
 - **Web UI** — embedded interactive graph explorer (`grapha serve`).
+- **Nodus package** — `nodus add wenext/grapha --adapter claude` for one-liner project setup with skills, rules, and commands.
 - **Multi-language** — Rust and Swift today. Architecture supports adding Java, Kotlin, C#, TypeScript.
 
 ## Install
@@ -61,42 +70,40 @@ cargo install --path grapha
 # Index a project
 grapha index .
 
-# Search for symbols
-grapha symbol search sendMessage
+# Search with filters
+grapha symbol search "ViewModel" --kind struct
+grapha symbol search "send" --kind function --module LamaLudo --context
+grapha symbol search "config" --fuzzy
 
 # 360° context for a symbol
-grapha symbol context sendMessage
-
-# Human-readable tree output for graph queries
-grapha flow trace handleSendResult --direction reverse --format tree
-
-# Force ANSI-highlighted tree output for CI logs
-grapha --color always flow trace handleSendResult --direction reverse --format tree
+grapha symbol context sendMessage --format tree
 
 # Impact analysis: what breaks if this changes?
-grapha symbol impact bootstrapGame --depth 5
+grapha symbol impact bootstrapGame --depth 5 --format tree
 
 # Forward trace: entry point → terminal operations
-grapha flow trace bootstrapGame
+grapha flow trace bootstrapGame --format tree
+
+# Reverse: which entry points reach this symbol?
+grapha flow trace handleSendResult --direction reverse --format tree
 
 # Derived semantic effect graph
 grapha flow graph bootstrapGame --format tree
 
-# Reverse: which entry points reach this symbol?
-grapha flow trace handleSendResult --direction reverse
-
 # List auto-detected entry points
 grapha flow entries
 
-# Localization lookups
-grapha l10n symbol body
-grapha l10n usages account_forget_password --table Localizable
+# Project orientation
+grapha repo map --module LamaLudo
 
 # Change detection
 grapha repo changes
 
 # Interactive web UI
 grapha serve --port 8765
+
+# MCP server for AI agents
+grapha serve --mcp
 ```
 
 ## Commands
@@ -104,13 +111,14 @@ grapha serve --port 8765
 ### `grapha index` — Build the graph
 
 ```bash
-grapha index .                         # Index project (SQLite)
+grapha index .                         # Index project (SQLite, incremental)
+grapha index . --full-rebuild          # Force full rebuild
+grapha index . --timing                # Show per-phase timing breakdown
 grapha index . --format json           # JSON output (debugging)
 grapha index . --store-dir /tmp/idx    # Custom storage
-grapha index . --full-rebuild          # Force full store/search rebuild
 ```
 
-Auto-discovers Xcode's index store from DerivedData for compiler-resolved symbols. Falls back to SwiftSyntax and then tree-sitter when no index is available. SQLite storage and the search index sync incrementally by default when a compatible prior index exists.
+Auto-discovers Xcode's index store from DerivedData for compiler-resolved symbols. Falls back to SwiftSyntax and then tree-sitter when no index is available. SQLite storage and the search index sync incrementally by default.
 
 ### `grapha analyze` — One-shot extraction
 
@@ -122,72 +130,62 @@ grapha analyze src/ --filter fn,struct # Filter by symbol kind
 grapha analyze src/ -o graph.json      # Write to file
 ```
 
+### `grapha symbol search` — Full-text search
+
+```bash
+grapha symbol search "ViewModel"                        # Basic BM25 search
+grapha symbol search "send" --kind function             # Filter by kind
+grapha symbol search "Config" --module FrameUI           # Filter by module
+grapha symbol search "view" --role entry_point           # Filter by role
+grapha symbol search "VeiwModel" --fuzzy                 # Typo-tolerant
+grapha symbol search "sendGift" --context                # Inline snippets + deps
+grapha symbol search "handle" --kind function --limit 5  # Combined
+```
+
 ### `grapha symbol context` — 360° symbol view
 
 ```bash
-grapha symbol context Config                  # Callers, callees, implements
-grapha symbol context bootstrapGame           # Fuzzy name matching
-grapha symbol context bootstrapGame --format tree
-grapha --color always symbol context bootstrapGame --format tree
+grapha symbol context Config                             # Callers, callees, reads, implements
+grapha symbol context bootstrapGame --format tree        # Tree output
+grapha symbol context sendGift --fields module,signature # Custom fields
 ```
 
 ### `grapha symbol impact` — Blast radius
 
 ```bash
-grapha symbol impact bootstrapGame            # Who depends on this?
-grapha symbol impact bootstrapGame --depth 5  # Deeper traversal
+grapha symbol impact bootstrapGame                       # Who depends on this?
+grapha symbol impact bootstrapGame --depth 5             # Deeper traversal
 grapha symbol impact bootstrapGame --format tree
-grapha --color always symbol impact bootstrapGame --format tree
 ```
 
 ### `grapha flow trace` — Forward/reverse dataflow
 
 ```bash
-grapha flow trace bootstrapGame                           # Entry → service → terminal ops
+grapha flow trace bootstrapGame                          # Entry → terminals
 grapha flow trace sendMessage --depth 10
-grapha flow trace handleSendResult --direction reverse    # Which entry points reach this?
+grapha flow trace handleSendResult --direction reverse   # Which entries reach this?
 grapha flow trace bootstrapGame --format tree
-grapha --color always flow trace bootstrapGame --format tree
 ```
 
 ### `grapha flow graph` — Derived semantic effect graph
 
 ```bash
 grapha flow graph bootstrapGame
-grapha flow graph sendMessage --depth 10
-grapha flow graph bootstrapGame --format tree
-grapha --color always flow graph bootstrapGame --format tree
+grapha flow graph sendMessage --depth 10 --format tree
 ```
 
 ### `grapha flow entries` — List entry points
 
 ```bash
-grapha flow entries                         # All detected entry points
+grapha flow entries
 grapha flow entries --format tree
-grapha --color always flow entries --format tree
 ```
 
-`--color auto|always|never` controls ANSI styling for tree output. `auto` enables theme-friendly terminal styling only when stdout is a terminal, `always` forces that styling for CI/log capture, and `never` keeps tree output plain. JSON output is always uncolored.
-
-### `grapha symbol search` — Full-text search
+### `grapha repo map` — File/symbol overview
 
 ```bash
-grapha symbol search "ViewModel"
-grapha symbol search "send" --limit 10
-```
-
-### `grapha l10n symbol` — Resolve localization records
-
-```bash
-grapha l10n symbol body
-grapha l10n symbol AuthView --format tree
-```
-
-### `grapha l10n usages` — Find localization usage sites
-
-```bash
-grapha l10n usages account_forget_password
-grapha l10n usages shared_title --table Localizable --format tree
+grapha repo map                        # Full project
+grapha repo map --module FrameUI       # Single module
 ```
 
 ### `grapha repo changes` — Git change detection
@@ -198,13 +196,84 @@ grapha repo changes staged             # Only staged
 grapha repo changes main               # Compare against branch
 ```
 
-### `grapha serve` — Web UI
+### `grapha serve` — Web UI and MCP server
 
 ```bash
-grapha serve --port 8765               # Open http://localhost:8765
+grapha serve --port 8765               # Web UI at http://localhost:8765
+grapha serve --mcp                     # MCP server over stdio
 ```
 
-Interactive graph visualization with vis-network: click nodes, trace flows, search symbols, filter by kind/role.
+### `grapha l10n` — Localization
+
+```bash
+grapha l10n symbol body                                  # Resolve localization records
+grapha l10n usages account_forget_password --table Localizable
+```
+
+`--color auto|always|never` controls ANSI styling for tree output. `--fields` controls which columns appear in output (see Output Customization below).
+
+## Configuration
+
+Optional `grapha.toml` at project root:
+
+```toml
+[swift]
+index_store = true              # Set false to skip index store, use tree-sitter only
+
+[output]
+default_fields = ["file", "module"]  # Default fields for all query output
+
+[[external]]
+name = "FrameUI"
+path = "/path/to/local/frameui"      # Include external repo in the graph
+
+[[external]]
+name = "FrameNetwork"
+path = "/path/to/local/framenetwork"
+
+[[classifiers]]
+pattern = "FirebaseFirestore.*setData"
+terminal = "persistence"
+direction = "write"
+operation = "set"
+```
+
+### Output Customization
+
+The `--fields` flag controls which optional columns appear in tree/JSON output:
+
+```bash
+grapha symbol context foo --fields module,signature   # Add module and signature
+grapha symbol context foo --fields all                # Show everything
+grapha symbol context foo --fields none               # Name + kind only
+```
+
+Available fields: `file`, `id`, `module`, `span`, `snippet`, `visibility`, `signature`, `role`.
+
+### MCP Server
+
+Add to `.mcp.json` or Claude Code settings:
+
+```json
+{
+  "mcpServers": {
+    "grapha": {
+      "command": "grapha",
+      "args": ["serve", "--mcp", "--path", "."]
+    }
+  }
+}
+```
+
+Tools: `search_symbols`, `get_symbol_context`, `get_impact`, `get_file_map`, `trace`, `index_project`.
+
+### Nodus Package
+
+```bash
+nodus add wenext/grapha --adapter claude
+```
+
+Installs skills, rules, and slash commands (`/index`, `/search`, `/impact`) for grapha-aware AI workflows.
 
 ## Architecture
 
@@ -213,7 +282,8 @@ Interactive graph visualization with vis-network: click nodes, trace flows, sear
 ```
 grapha-core/     Shared types (Node, Edge, Graph, ExtractionResult)
 grapha-swift/    Swift extraction: index store → SwiftSyntax → tree-sitter waterfall
-grapha/          CLI binary, Rust extractor, pipeline, query engines, web UI
+grapha/          CLI binary, Rust extractor, pipeline, query engines, web UI, MCP server
+nodus/           Agent tooling package (skills, rules, commands)
 ```
 
 ### Extraction Waterfall (Swift)
@@ -222,6 +292,7 @@ grapha/          CLI binary, Rust extractor, pipeline, query engines, web UI
 1. Xcode Index Store (binary FFI via Swift bridge)
    → compiler-resolved USRs, confidence 1.0
    → auto-discovered from DerivedData
+   → concurrent extraction (lock-free per-file context)
 
 2. SwiftSyntax (JSON-string FFI via Swift bridge)
    → accurate parsing, no type resolution, confidence 0.9
@@ -230,23 +301,23 @@ grapha/          CLI binary, Rust extractor, pipeline, query engines, web UI
    → fast fallback, limited accuracy, confidence 0.6-0.8
 ```
 
-The Swift bridge (`libGraphaSwiftBridge.dylib`) is automatically compiled by `build.rs` when a Swift toolchain is detected. The index-store path crosses the FFI boundary as a flat binary buffer (packed structs + string table), while the SwiftSyntax path currently returns a JSON string that Rust decodes into the shared graph model. No Swift required for Rust-only projects.
+After index store extraction, tree-sitter enriches doc comments, SwiftUI view structure, and localization metadata in a single shared parse. Files without SwiftUI/localization markers skip enrichment entirely.
 
 ### Pipeline
 
 ```
-Discover → Extract → Merge → Classify → Compress → Store → Query/Serve
-              ↑          ↑        ↑
-      index store /  module-   entry points
-      SwiftSyntax /  aware     + terminals
-      tree-sitter    resolution
+Discover → Extract → Snippet → Merge → Classify → Compress → Store → Query/Serve
+              ↑          ↑        ↑        ↑
+      index store /   source   module-   entry points
+      SwiftSyntax /   capture  aware     + terminals
+      tree-sitter             resolution
 ```
 
 ### Graph Model
 
 Nodes represent symbols (functions, types, properties). Edges represent relationships with confidence scores.
 
-**Node kinds:** `function`, `struct`, `enum`, `trait`, `protocol`, `extension`, `property`, `field`, `variant`, `constant`, `type_alias`, `impl`, `module`
+**Node kinds:** `function`, `struct`, `enum`, `trait`, `protocol`, `extension`, `property`, `field`, `variant`, `constant`, `type_alias`, `impl`, `module`, `view`, `branch`
 
 **Edge kinds:**
 
@@ -275,22 +346,6 @@ Nodes represent symbols (functions, types, properties). Edges represent relation
 - `entry_point` — SwiftUI View.body, @Observable methods, fn main, #[test]
 - `terminal` — network, persistence, cache, event, keychain, search
 
-## Configuration
-
-Optional `grapha.toml` for custom classifiers and entry points:
-
-```toml
-[[classifiers]]
-pattern = "FirebaseFirestore.*setData"
-terminal = "persistence"
-direction = "write"
-operation = "set"
-
-[[entry_points]]
-language = "swift"
-pattern = ".*Coordinator.start"
-```
-
 ## Supported Languages
 
 | Language | Extraction | Type Resolution |
@@ -304,7 +359,7 @@ The per-language crate architecture (`grapha-swift/`, future `grapha-java/`, etc
 
 ```bash
 cargo build                    # Build all workspace crates
-cargo test                     # Run all tests
+cargo test                     # Run all tests (~295)
 cargo build -p grapha-core     # Build shared types only
 cargo build -p grapha-swift    # Build Swift extractor
 cargo run -p grapha -- <cmd>   # Run the CLI
