@@ -9,7 +9,6 @@ use grapha_core::graph::{
 };
 
 const STORE_SCHEMA_VERSION: &str = "4";
-const BATCH_SIZE: usize = 500;
 
 pub struct SqliteStore {
     path: PathBuf,
@@ -140,69 +139,44 @@ impl SqliteStore {
         nodes: &[Node],
         replace: bool,
     ) -> anyhow::Result<()> {
-        const COLS: usize = 15;
         let verb = if replace {
             "INSERT OR REPLACE"
         } else {
             "INSERT"
         };
-        let columns = "id, kind, name, file,
+        let sql = format!(
+            "{verb} INTO nodes (id, kind, name, file,
                 span_start_line, span_start_col, span_end_line, span_end_col,
-                visibility, metadata, role, signature, doc_comment, module, snippet";
-        let empty_meta = "{}".to_string();
-
-        // Pre-serialize JSON fields outside the batch loop
-        let mut pre: Vec<(String, String)> = Vec::with_capacity(nodes.len());
+                visibility, metadata, role, signature, doc_comment, module, snippet)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)"
+        );
+        let mut stmt = tx.prepare_cached(&sql)?;
+        let empty_meta = "{}";
         for node in nodes {
-            let role_json: String = match &node.role {
-                Some(r) => serde_json::to_string(r)?,
-                None => String::new(),
-            };
+            let role_json: Option<String> =
+                node.role.as_ref().map(serde_json::to_string).transpose()?;
             let meta_str = if node.metadata.is_empty() {
-                empty_meta.clone()
+                empty_meta.to_string()
             } else {
                 serde_json::to_string(&node.metadata)?
             };
-            pre.push((role_json, meta_str));
-        }
-
-        for chunk_start in (0..nodes.len()).step_by(BATCH_SIZE) {
-            let chunk_end = (chunk_start + BATCH_SIZE).min(nodes.len());
-            let chunk_len = chunk_end - chunk_start;
-            let placeholders = (0..chunk_len)
-                .map(|_| "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
-                .collect::<Vec<_>>()
-                .join(",");
-            let sql = format!("{verb} INTO nodes ({columns}) VALUES {placeholders}");
-            let mut params: Vec<Box<dyn rusqlite::types::ToSql>> =
-                Vec::with_capacity(chunk_len * COLS);
-            for i in chunk_start..chunk_end {
-                let node = &nodes[i];
-                let (role_json, meta_str) = &pre[i];
-                let role_val: Option<&str> = if role_json.is_empty() {
-                    None
-                } else {
-                    Some(role_json)
-                };
-                params.push(Box::new(node.id.clone()));
-                params.push(Box::new(node_kind_str(&node.kind).to_string()));
-                params.push(Box::new(node.name.clone()));
-                params.push(Box::new(node.file.to_string_lossy().into_owned()));
-                params.push(Box::new(node.span.start[0] as i64));
-                params.push(Box::new(node.span.start[1] as i64));
-                params.push(Box::new(node.span.end[0] as i64));
-                params.push(Box::new(node.span.end[1] as i64));
-                params.push(Box::new(visibility_str(&node.visibility).to_string()));
-                params.push(Box::new(meta_str.clone()));
-                params.push(Box::new(role_val.map(|s| s.to_string())));
-                params.push(Box::new(node.signature.clone()));
-                params.push(Box::new(node.doc_comment.clone()));
-                params.push(Box::new(node.module.clone()));
-                params.push(Box::new(node.snippet.clone()));
-            }
-            let param_refs: Vec<&dyn rusqlite::types::ToSql> =
-                params.iter().map(|p| p.as_ref()).collect();
-            tx.execute(&sql, param_refs.as_slice())?;
+            stmt.execute(rusqlite::params![
+                node.id,
+                node_kind_str(&node.kind),
+                node.name,
+                node.file.to_string_lossy().as_ref(),
+                node.span.start[0] as i64,
+                node.span.start[1] as i64,
+                node.span.end[0] as i64,
+                node.span.end[1] as i64,
+                visibility_str(&node.visibility),
+                meta_str,
+                role_json,
+                node.signature,
+                node.doc_comment,
+                node.module,
+                node.snippet,
+            ])?;
         }
         Ok(())
     }
@@ -212,55 +186,35 @@ impl SqliteStore {
         edges: impl Iterator<Item = (String, &'a Edge)>,
         replace: bool,
     ) -> anyhow::Result<()> {
-        const COLS: usize = 10;
         let verb = if replace {
             "INSERT OR REPLACE"
         } else {
             "INSERT"
         };
-        let columns = "edge_id, source, target, kind, confidence,
-                direction, operation, condition, async_boundary, provenance";
-
-        // Collect edges and pre-serialize JSON fields
-        let collected: Vec<(String, &Edge)> = edges.collect();
-        let mut pre: Vec<(Option<String>, Option<i64>, String)> =
-            Vec::with_capacity(collected.len());
-        for (_, edge) in &collected {
+        let sql = format!(
+            "{verb} INTO edges (edge_id, source, target, kind, confidence,
+                direction, operation, condition, async_boundary, provenance)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)"
+        );
+        let mut stmt = tx.prepare_cached(&sql)?;
+        for (edge_id, edge) in edges {
             let direction_str: Option<String> =
                 edge.direction.as_ref().map(enum_to_str).transpose()?;
             let async_boundary_int: Option<i64> =
                 edge.async_boundary.map(|b| if b { 1 } else { 0 });
             let provenance = serde_json::to_string(&edge.provenance)?;
-            pre.push((direction_str, async_boundary_int, provenance));
-        }
-
-        for chunk_start in (0..collected.len()).step_by(BATCH_SIZE) {
-            let chunk_end = (chunk_start + BATCH_SIZE).min(collected.len());
-            let chunk_len = chunk_end - chunk_start;
-            let placeholders = (0..chunk_len)
-                .map(|_| "(?,?,?,?,?,?,?,?,?,?)")
-                .collect::<Vec<_>>()
-                .join(",");
-            let sql = format!("{verb} INTO edges ({columns}) VALUES {placeholders}");
-            let mut params: Vec<Box<dyn rusqlite::types::ToSql>> =
-                Vec::with_capacity(chunk_len * COLS);
-            for i in chunk_start..chunk_end {
-                let (edge_id, edge) = &collected[i];
-                let (direction_str, async_boundary_int, provenance) = &pre[i];
-                params.push(Box::new(edge_id.clone()));
-                params.push(Box::new(edge.source.clone()));
-                params.push(Box::new(edge.target.clone()));
-                params.push(Box::new(edge_kind_str(&edge.kind).to_string()));
-                params.push(Box::new(edge.confidence));
-                params.push(Box::new(direction_str.clone()));
-                params.push(Box::new(edge.operation.clone()));
-                params.push(Box::new(edge.condition.clone()));
-                params.push(Box::new(*async_boundary_int));
-                params.push(Box::new(provenance.clone()));
-            }
-            let param_refs: Vec<&dyn rusqlite::types::ToSql> =
-                params.iter().map(|p| p.as_ref()).collect();
-            tx.execute(&sql, param_refs.as_slice())?;
+            stmt.execute(rusqlite::params![
+                edge_id,
+                edge.source,
+                edge.target,
+                edge_kind_str(&edge.kind),
+                edge.confidence,
+                direction_str,
+                edge.operation,
+                edge.condition,
+                async_boundary_int,
+                provenance,
+            ])?;
         }
         Ok(())
     }
