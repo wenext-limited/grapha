@@ -1147,8 +1147,22 @@ fn extract_swift_doc_comment(node: tree_sitter::Node, source: &[u8]) -> Option<S
     }
 }
 
-/// Check if a Swift node has a specific attribute (e.g., @main, @Observable).
-fn has_swift_attribute(node: tree_sitter::Node, source: &[u8], attr_name: &str) -> bool {
+fn parse_swift_attribute_name(text: &str) -> Option<String> {
+    let trimmed = text.trim().trim_start_matches('@');
+    let ident: String = trimmed
+        .chars()
+        .take_while(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '.'))
+        .collect();
+    let base = ident.rsplit('.').next().unwrap_or(&ident).trim();
+    if base.is_empty() {
+        None
+    } else {
+        Some(base.to_string())
+    }
+}
+
+fn collect_swift_attribute_names(node: tree_sitter::Node, source: &[u8]) -> Vec<String> {
+    let mut names = Vec::new();
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
         if child.kind() == "modifiers" {
@@ -1156,16 +1170,77 @@ fn has_swift_attribute(node: tree_sitter::Node, source: &[u8], attr_name: &str) 
             for modifier in child.named_children(&mut mod_cursor) {
                 if modifier.kind() == "attribute"
                     && let Ok(text) = modifier.utf8_text(source)
+                    && let Some(name) = parse_swift_attribute_name(text)
                 {
-                    let trimmed = text.trim_start_matches('@');
-                    if trimmed == attr_name {
-                        return true;
-                    }
+                    names.push(name);
                 }
             }
         }
     }
-    false
+    names
+}
+
+/// Check if a Swift node has a specific attribute (e.g., @main, @Observable).
+fn has_swift_attribute(node: tree_sitter::Node, source: &[u8], attr_name: &str) -> bool {
+    collect_swift_attribute_names(node, source)
+        .into_iter()
+        .any(|name| name == attr_name)
+}
+
+struct SwiftUiDynamicPropertyMetadata {
+    wrapper: String,
+}
+
+fn extract_swiftui_dynamic_property_metadata(
+    node: tree_sitter::Node,
+    source: &[u8],
+) -> Option<SwiftUiDynamicPropertyMetadata> {
+    let wrapper = collect_swift_attribute_names(node, source)
+        .into_iter()
+        .find_map(|name| {
+            let normalized = match name.as_str() {
+                "State" => "state",
+                "StateObject" => "state_object",
+                "ObservedObject" => "observed_object",
+                "EnvironmentObject" => "environment_object",
+                "Environment" => "environment",
+                "AppStorage" => "app_storage",
+                "SceneStorage" => "scene_storage",
+                "Binding" => "binding",
+                "GestureState" => "gesture_state",
+                "FocusState" => "focus_state",
+                "FocusedValue" => "focused_value",
+                "FocusedBinding" => "focused_binding",
+                "FetchRequest" => "fetch_request",
+                "SectionedFetchRequest" => "sectioned_fetch_request",
+                "Query" => "query",
+                "Bindable" => "bindable",
+                _ => return None,
+            };
+            Some(normalized.to_string())
+        })?;
+
+    Some(SwiftUiDynamicPropertyMetadata { wrapper })
+}
+
+fn apply_swiftui_dynamic_property_metadata(
+    result: &mut ExtractionResult,
+    node_id: &str,
+    metadata: &SwiftUiDynamicPropertyMetadata,
+) {
+    let Some(node) = node_by_id_mut(result, node_id) else {
+        return;
+    };
+    node.metadata
+        .insert("swiftui.dynamic_property".to_string(), "true".to_string());
+    node.metadata.insert(
+        "swiftui.dynamic_property.wrapper".to_string(),
+        metadata.wrapper.clone(),
+    );
+    node.metadata.insert(
+        "swiftui.invalidation_source".to_string(),
+        "true".to_string(),
+    );
 }
 
 /// Collect inheritance/conformance names from a class_declaration node.
@@ -1503,6 +1578,10 @@ fn same_owner_member_id(owner_id: &str, name: &str) -> Option<String> {
     Some(format!("{owner_prefix}::{name}"))
 }
 
+fn dependency_target_id(owner_id: &str, file: &str, module_path: &[String], name: &str) -> String {
+    same_owner_member_id(owner_id, name).unwrap_or_else(|| make_id(file, module_path, name))
+}
+
 fn enclosing_owner_type_name(node: tree_sitter::Node, source: &[u8]) -> Option<String> {
     let mut current = Some(node);
     while let Some(cursor) = current {
@@ -1521,6 +1600,106 @@ fn uppercase_identifier(name: &str) -> bool {
     name.chars()
         .next()
         .is_some_and(|ch| ch.is_ascii_uppercase())
+}
+
+fn navigation_base_is_owner(
+    base: tree_sitter::Node,
+    source: &[u8],
+    owner_name: Option<&str>,
+) -> bool {
+    let Ok(text) = base.utf8_text(source) else {
+        return false;
+    };
+    let trimmed = text.trim();
+    trimmed == "self" || trimmed == "Self" || owner_name.is_some_and(|owner| trimmed == owner)
+}
+
+fn dependency_read_name(
+    node: tree_sitter::Node,
+    source: &[u8],
+    owner_name: Option<&str>,
+) -> Option<String> {
+    if node.kind() != "simple_identifier" {
+        return None;
+    }
+
+    let name = node.utf8_text(source).ok()?.trim().to_string();
+    if name.is_empty() || name == "_" || uppercase_identifier(&name) {
+        return None;
+    }
+
+    if let Some(parent) = node.parent()
+        && parent.kind() == "navigation_suffix"
+        && let Some(nav) = parent.parent()
+        && nav.kind() == "navigation_expression"
+        && let Some((base, _)) = navigation_base_and_member_name(nav, source)
+        && !navigation_base_is_owner(base, source, owner_name)
+    {
+        return None;
+    }
+
+    Some(name)
+}
+
+fn emit_dependency_read(
+    node: tree_sitter::Node,
+    source: &[u8],
+    file: &str,
+    module_path: &[String],
+    owner_id: &str,
+    result: &mut ExtractionResult,
+) {
+    let owner_name = enclosing_owner_type_name(node, source);
+    let Some(name) = dependency_read_name(node, source, owner_name.as_deref()) else {
+        return;
+    };
+
+    let target_id = dependency_target_id(owner_id, file, module_path, &name);
+    if target_id == owner_id {
+        return;
+    }
+
+    emit_unique_edge(
+        result,
+        Edge {
+            source: owner_id.to_string(),
+            target: target_id,
+            kind: EdgeKind::Reads,
+            confidence: 0.85,
+            direction: None,
+            operation: owner_name,
+            condition: find_enclosing_swift_condition(node, source),
+            async_boundary: None,
+            provenance: node_edge_provenance(file, node, owner_id),
+        },
+    );
+}
+
+fn extract_property_dependency_reads(
+    node: tree_sitter::Node,
+    source: &[u8],
+    file: &str,
+    module_path: &[String],
+    owner_id: &str,
+    result: &mut ExtractionResult,
+) {
+    emit_dependency_read(node, source, file, module_path, owner_id, result);
+
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if matches!(
+            child.kind(),
+            "class_declaration"
+                | "protocol_declaration"
+                | "function_declaration"
+                | "protocol_function_declaration"
+                | "init_declaration"
+                | "deinit_declaration"
+        ) {
+            continue;
+        }
+        extract_property_dependency_reads(child, source, file, module_path, owner_id, result);
+    }
 }
 
 fn is_builtin_swiftui_view(name: &str) -> bool {
@@ -1869,6 +2048,76 @@ fn recurse_swiftui_named_children(
     anchors
 }
 
+fn extract_swiftui_dependency_reads(
+    node: tree_sitter::Node,
+    source: &[u8],
+    file: &str,
+    module_path: &[String],
+    owner_id: &str,
+    result: &mut ExtractionResult,
+) {
+    match node.kind() {
+        "call_expression" => {
+            let structural_lambdas = structural_call_suffix_lambda_children(node, source);
+
+            let mut cursor = node.walk();
+            for child in node.named_children(&mut cursor) {
+                if child.kind() == "call_suffix" {
+                    let mut suffix_cursor = child.walk();
+                    for suffix_child in child.named_children(&mut suffix_cursor) {
+                        if suffix_child.kind() != "lambda_literal" {
+                            extract_swiftui_dependency_reads(
+                                suffix_child,
+                                source,
+                                file,
+                                module_path,
+                                owner_id,
+                                result,
+                            );
+                        }
+                    }
+                    continue;
+                }
+
+                extract_swiftui_dependency_reads(
+                    child,
+                    source,
+                    file,
+                    module_path,
+                    owner_id,
+                    result,
+                );
+            }
+
+            for lambda in structural_lambdas {
+                extract_swiftui_dependency_reads(
+                    lambda,
+                    source,
+                    file,
+                    module_path,
+                    owner_id,
+                    result,
+                );
+            }
+        }
+        _ => {
+            emit_dependency_read(node, source, file, module_path, owner_id, result);
+
+            let mut cursor = node.walk();
+            for child in node.named_children(&mut cursor) {
+                extract_swiftui_dependency_reads(
+                    child,
+                    source,
+                    file,
+                    module_path,
+                    owner_id,
+                    result,
+                );
+            }
+        }
+    }
+}
+
 fn extract_swiftui_if_structure(
     node: tree_sitter::Node,
     source: &[u8],
@@ -2180,6 +2429,7 @@ fn extract_swiftui_declaration_structure(
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
         if matches!(child.kind(), "computed_property" | "function_body") {
+            extract_swiftui_dependency_reads(child, source, file, module_path, decl_id, result);
             let _ = extract_swiftui_structure(
                 child,
                 source,
@@ -2576,6 +2826,20 @@ fn collect_swiftui_declaration_nodes<'a>(
     }
 }
 
+fn collect_property_declaration_nodes<'a>(
+    node: tree_sitter::Node<'a>,
+    out: &mut Vec<tree_sitter::Node<'a>>,
+) {
+    if node.kind() == "property_declaration" {
+        out.push(node);
+    }
+
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_property_declaration_nodes(child, out);
+    }
+}
+
 fn declaration_name(node: tree_sitter::Node, source: &[u8]) -> Option<String> {
     match node.kind() {
         "property_declaration" => find_pattern_name(node, source),
@@ -2796,6 +3060,35 @@ pub fn enrich_swiftui_structure(
     let candidate_owner_names = candidate_owner_names(result);
 
     let file_str = file_path.to_string_lossy().to_string();
+
+    let mut property_nodes = Vec::new();
+    collect_property_declaration_nodes(tree.root_node(), &mut property_nodes);
+    for property_node in property_nodes {
+        let Some(property_id) = matching_swiftui_declaration_id(
+            result,
+            file_path,
+            property_node,
+            source,
+            &candidate_owner_names,
+        ) else {
+            continue;
+        };
+        if let Some(metadata) = extract_swiftui_dynamic_property_metadata(property_node, source) {
+            apply_swiftui_dynamic_property_metadata(result, &property_id, &metadata);
+        }
+        if declaration_returns_swiftui_view(property_node, source) {
+            continue;
+        }
+        extract_property_dependency_reads(
+            property_node,
+            source,
+            &file_str,
+            &[],
+            &property_id,
+            result,
+        );
+    }
+
     for decl_node in declaration_nodes {
         let Some(decl_id) = matching_swiftui_declaration_id(
             result,
@@ -3434,6 +3727,152 @@ mod tests {
                 .iter()
                 .all(|n| !(n.kind == NodeKind::Branch && n.name == "switch mode")),
             "non-view modifier closures should not become structural branches"
+        );
+    }
+
+    #[test]
+    fn enriches_swiftui_body_with_read_dependencies() {
+        let result = extract_with_localization(
+            r#"
+            import SwiftUI
+
+            struct RoomPage: View {
+                @State private var roomMode = 0
+                @State private var luckyGameType: Int? = nil
+                static let headerViewHeight = 44
+
+                var canShowGameRoom: Bool {
+                    roomMode > 0 && luckyGameType != nil
+                }
+
+                var roomHeaderView: some View {
+                    Text("\(roomMode)")
+                }
+
+                var body: some View {
+                    VStack {
+                        if canShowGameRoom {
+                            roomHeaderView
+                        }
+                    }
+                    .frame(height: Self.headerViewHeight)
+                }
+            }
+            "#,
+        );
+        let graph = grapha_core::merge(vec![result]);
+
+        let has_read = |target: &str| {
+            graph.edges.iter().any(|edge| {
+                edge.source == "test.swift::RoomPage::body"
+                    && edge.target == target
+                    && edge.kind == EdgeKind::Reads
+            })
+        };
+
+        assert!(has_read("test.swift::RoomPage::canShowGameRoom"));
+        assert!(has_read("test.swift::RoomPage::roomHeaderView"));
+        assert!(has_read("test.swift::RoomPage::headerViewHeight"));
+    }
+
+    #[test]
+    fn enriches_computed_properties_with_read_dependencies() {
+        let result = extract_with_localization(
+            r#"
+            import SwiftUI
+
+            struct RoomPage: View {
+                @State private var roomMode = 0
+                @State private var luckyGameType: Int? = nil
+                @State private var minimizeGameRoom = false
+
+                var canShowGameRoom: Bool {
+                    guard luckyGameType != nil else { return false }
+                    return roomMode > 0 && !minimizeGameRoom
+                }
+
+                var body: some View { EmptyView() }
+            }
+            "#,
+        );
+        let graph = grapha_core::merge(vec![result]);
+
+        let has_read = |target: &str| {
+            graph.edges.iter().any(|edge| {
+                edge.source == "test.swift::RoomPage::canShowGameRoom"
+                    && edge.target == target
+                    && edge.kind == EdgeKind::Reads
+            })
+        };
+
+        assert!(has_read("test.swift::RoomPage::roomMode"));
+        assert!(has_read("test.swift::RoomPage::luckyGameType"));
+        assert!(has_read("test.swift::RoomPage::minimizeGameRoom"));
+    }
+
+    #[test]
+    fn marks_swiftui_dynamic_properties_as_invalidation_sources() {
+        let result = extract_with_localization(
+            r#"
+            import SwiftUI
+
+            struct RoomPage: View {
+                @State private var roomMode = 0
+                @StateObject private var ctx = Room.shared
+                @EnvironmentObject private var router: RouterViewModel
+                @AppStorage("flag") private var showFlag = false
+
+                var body: some View { EmptyView() }
+            }
+            "#,
+        );
+
+        let node = |name: &str| {
+            result
+                .nodes
+                .iter()
+                .find(|node| node.name == name)
+                .unwrap_or_else(|| panic!("missing node {name}"))
+        };
+
+        assert_eq!(
+            node("roomMode")
+                .metadata
+                .get("swiftui.dynamic_property.wrapper")
+                .map(|value| value.as_str()),
+            Some("state")
+        );
+        assert_eq!(
+            node("ctx")
+                .metadata
+                .get("swiftui.dynamic_property.wrapper")
+                .map(|value| value.as_str()),
+            Some("state_object")
+        );
+        assert_eq!(
+            node("router")
+                .metadata
+                .get("swiftui.dynamic_property.wrapper")
+                .map(|value| value.as_str()),
+            Some("environment_object")
+        );
+        assert_eq!(
+            node("showFlag")
+                .metadata
+                .get("swiftui.dynamic_property.wrapper")
+                .map(|value| value.as_str()),
+            Some("app_storage")
+        );
+        assert!(
+            ["roomMode", "ctx", "router", "showFlag"]
+                .iter()
+                .all(|name| {
+                    node(name)
+                        .metadata
+                        .get("swiftui.invalidation_source")
+                        .is_some_and(|value| value == "true")
+                }),
+            "dynamic SwiftUI properties should be tagged as invalidation sources"
         );
     }
 

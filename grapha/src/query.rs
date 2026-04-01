@@ -56,6 +56,12 @@ pub(crate) fn normalize_symbol_name(name: &str) -> &str {
         .unwrap_or(without_accessor)
 }
 
+pub(crate) fn is_swiftui_invalidation_source(node: &Node) -> bool {
+    node.metadata
+        .get("swiftui.invalidation_source")
+        .is_some_and(|value| value == "true")
+}
+
 fn kind_preference(kind: NodeKind) -> usize {
     match kind {
         NodeKind::Function => 0,
@@ -177,6 +183,9 @@ pub struct ContextResult {
     pub symbol: SymbolInfo,
     pub callers: Vec<SymbolRef>,
     pub callees: Vec<SymbolRef>,
+    pub reads: Vec<SymbolRef>,
+    pub read_by: Vec<SymbolRef>,
+    pub invalidation_sources: Vec<SymbolRef>,
     pub contains: Vec<SymbolRef>,
     pub contains_tree: Vec<SymbolTreeRef>,
     pub contained_by: Vec<SymbolRef>,

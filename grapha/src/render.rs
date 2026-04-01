@@ -337,6 +337,14 @@ pub fn render_context_with_options(result: &ContextResult, options: RenderOption
 
     push_symbol_section(&mut children, "callers", &result.callers, options);
     push_symbol_section(&mut children, "callees", &result.callees, options);
+    push_symbol_section(&mut children, "reads", &result.reads, options);
+    push_symbol_section(&mut children, "read_by", &result.read_by, options);
+    push_symbol_section(
+        &mut children,
+        "invalidation_sources",
+        &result.invalidation_sources,
+        options,
+    );
 
     if !result.contains_tree.is_empty() {
         children.push(TreeNode::branch(
@@ -866,6 +874,9 @@ mod tests {
             symbol: symbol_info("helper", NodeKind::Function, "main.rs"),
             callers: vec![symbol_ref("main", NodeKind::Function, "main.rs")],
             callees: Vec::new(),
+            reads: Vec::new(),
+            read_by: Vec::new(),
+            invalidation_sources: Vec::new(),
             contains: Vec::new(),
             contains_tree: Vec::new(),
             contained_by: Vec::new(),
@@ -888,6 +899,17 @@ mod tests {
             symbol: symbol_info("body", NodeKind::Property, "ContentView.swift"),
             callers: Vec::new(),
             callees: Vec::new(),
+            reads: vec![symbol_ref(
+                "roomMode",
+                NodeKind::Property,
+                "ContentView.swift",
+            )],
+            read_by: Vec::new(),
+            invalidation_sources: vec![symbol_ref(
+                "roomMode",
+                NodeKind::Property,
+                "ContentView.swift",
+            )],
             contains: vec![symbol_ref("VStack", NodeKind::View, "ContentView.swift")],
             contains_tree: vec![SymbolTreeRef {
                 id: "ContentView.swift::body::VStack".into(),
@@ -922,6 +944,9 @@ mod tests {
         };
 
         let rendered = render_context_with_options(&result, RenderOptions::plain());
+        assert!(rendered.contains("reads (1)"));
+        assert!(rendered.contains("roomMode [property] (ContentView.swift)"));
+        assert!(rendered.contains("invalidation_sources (1)"));
         assert!(rendered.contains("contains (1)"));
         assert!(rendered.contains("├── contains (1)"));
         assert!(rendered.contains("│   └── VStack [view] (ContentView.swift)"));
@@ -1057,6 +1082,9 @@ mod tests {
             symbol: symbol_info("helper", NodeKind::Function, "main.rs"),
             callers: vec![symbol_ref("main", NodeKind::Function, "main.rs")],
             callees: Vec::new(),
+            reads: Vec::new(),
+            read_by: Vec::new(),
+            invalidation_sources: Vec::new(),
             contains: Vec::new(),
             contains_tree: Vec::new(),
             contained_by: Vec::new(),

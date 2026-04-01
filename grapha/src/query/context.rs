@@ -1,8 +1,11 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use grapha_core::graph::{EdgeKind, Graph};
 
-use super::{ContextResult, QueryResolveError, SymbolInfo, SymbolRef, SymbolTreeRef};
+use super::{
+    ContextResult, QueryResolveError, SymbolInfo, SymbolRef, SymbolTreeRef,
+    is_swiftui_invalidation_source,
+};
 
 fn to_symbol_ref(node: &grapha_core::graph::Node) -> SymbolRef {
     SymbolRef {
@@ -103,6 +106,35 @@ fn build_contains_tree<'a>(
     Some(to_symbol_tree_ref(node, contains))
 }
 
+fn collect_invalidation_sources<'a>(
+    start_id: &'a str,
+    reads_adj: &HashMap<&'a str, Vec<&'a str>>,
+    node_index: &HashMap<&'a str, &'a grapha_core::graph::Node>,
+) -> Vec<SymbolRef> {
+    let mut visited = HashSet::new();
+    let mut invalidation_sources = Vec::new();
+    let mut stack = vec![start_id];
+
+    while let Some(node_id) = stack.pop() {
+        if !visited.insert(node_id) {
+            continue;
+        }
+
+        let Some(node) = node_index.get(node_id).copied() else {
+            continue;
+        };
+        if is_swiftui_invalidation_source(node) {
+            invalidation_sources.push(to_symbol_ref(node));
+        }
+
+        if let Some(next_ids) = reads_adj.get(node_id) {
+            stack.extend(next_ids.iter().copied());
+        }
+    }
+
+    invalidation_sources
+}
+
 pub fn query_context(graph: &Graph, query: &str) -> Result<ContextResult, QueryResolveError> {
     let node = crate::query::resolve_node(&graph.nodes, query)?;
 
@@ -110,9 +142,12 @@ pub fn query_context(graph: &Graph, query: &str) -> Result<ContextResult, QueryR
         graph.nodes.iter().map(|n| (n.id.as_str(), n)).collect();
     let mut contains_adj: HashMap<&str, Vec<&str>> = HashMap::new();
     let mut type_ref_adj: HashMap<&str, Vec<&str>> = HashMap::new();
+    let mut reads_adj: HashMap<&str, Vec<&str>> = HashMap::new();
 
     let mut callers = Vec::new();
     let mut callees = Vec::new();
+    let mut reads = Vec::new();
+    let mut read_by = Vec::new();
     let mut contains_ids = Vec::new();
     let mut contained_by_ids = Vec::new();
     let mut implementors = Vec::new();
@@ -126,6 +161,7 @@ pub fn query_context(graph: &Graph, query: &str) -> Result<ContextResult, QueryR
             let sym_ref = to_symbol_ref(target);
             match edge.kind {
                 EdgeKind::Calls => callees.push(sym_ref),
+                EdgeKind::Reads => reads.push(sym_ref),
                 EdgeKind::Contains => contains_ids.push(target.id.as_str()),
                 EdgeKind::Implements => implements.push(sym_ref),
                 EdgeKind::TypeRef => type_refs.push(sym_ref),
@@ -138,6 +174,7 @@ pub fn query_context(graph: &Graph, query: &str) -> Result<ContextResult, QueryR
             let sym_ref = to_symbol_ref(source);
             match edge.kind {
                 EdgeKind::Calls => callers.push(sym_ref),
+                EdgeKind::Reads => read_by.push(sym_ref),
                 EdgeKind::Contains => contained_by_ids.push(source.id.as_str()),
                 EdgeKind::Implements => implementors.push(sym_ref),
                 _ => {}
@@ -146,6 +183,11 @@ pub fn query_context(graph: &Graph, query: &str) -> Result<ContextResult, QueryR
 
         if edge.kind == EdgeKind::Contains {
             contains_adj
+                .entry(edge.source.as_str())
+                .or_default()
+                .push(edge.target.as_str());
+        } else if edge.kind == EdgeKind::Reads {
+            reads_adj
                 .entry(edge.source.as_str())
                 .or_default()
                 .push(edge.target.as_str());
@@ -159,9 +201,13 @@ pub fn query_context(graph: &Graph, query: &str) -> Result<ContextResult, QueryR
 
     sort_refs_by_name(&mut callers);
     sort_refs_by_name(&mut callees);
+    sort_refs_by_name(&mut reads);
+    sort_refs_by_name(&mut read_by);
     sort_refs_by_name(&mut implementors);
     sort_refs_by_name(&mut implements);
     sort_refs_by_name(&mut type_refs);
+    let mut invalidation_sources = collect_invalidation_sources(&node.id, &reads_adj, &node_index);
+    sort_refs_by_name(&mut invalidation_sources);
     sort_ids_by_span(&mut contains_ids, &node_index);
     sort_ids_by_span(&mut contained_by_ids, &node_index);
 
@@ -198,6 +244,9 @@ pub fn query_context(graph: &Graph, query: &str) -> Result<ContextResult, QueryR
         },
         callers,
         callees,
+        reads,
+        read_by,
+        invalidation_sources,
         contains,
         contains_tree,
         contained_by,
@@ -275,6 +324,86 @@ mod tests {
         let ctx2 = query_context(&graph, "helper").unwrap();
         assert_eq!(ctx2.callers.len(), 1);
         assert_eq!(ctx2.callers[0].name, "main");
+    }
+
+    #[test]
+    fn context_tracks_read_dependencies() {
+        let mk = |id: &str, name: &str, metadata: StdHashMap<String, String>| Node {
+            id: id.into(),
+            kind: NodeKind::Property,
+            name: name.into(),
+            file: "view.swift".into(),
+            span: Span {
+                start: [0, 0],
+                end: [1, 0],
+            },
+            visibility: Visibility::Public,
+            metadata,
+            role: None,
+            signature: None,
+            doc_comment: None,
+            module: None,
+        };
+
+        let graph = Graph {
+            version: "0.1.0".to_string(),
+            nodes: vec![
+                mk("view.swift::RoomPage::body", "body", StdHashMap::new()),
+                mk(
+                    "view.swift::RoomPage::canShowGameRoom",
+                    "canShowGameRoom",
+                    StdHashMap::new(),
+                ),
+                mk(
+                    "view.swift::RoomPage::roomMode",
+                    "roomMode",
+                    StdHashMap::from([(
+                        "swiftui.invalidation_source".to_string(),
+                        "true".to_string(),
+                    )]),
+                ),
+            ],
+            edges: vec![
+                Edge {
+                    source: "view.swift::RoomPage::body".into(),
+                    target: "view.swift::RoomPage::canShowGameRoom".into(),
+                    kind: EdgeKind::Reads,
+                    confidence: 0.85,
+                    direction: None,
+                    operation: None,
+                    condition: None,
+                    async_boundary: None,
+                    provenance: Vec::new(),
+                },
+                Edge {
+                    source: "view.swift::RoomPage::canShowGameRoom".into(),
+                    target: "view.swift::RoomPage::roomMode".into(),
+                    kind: EdgeKind::Reads,
+                    confidence: 0.85,
+                    direction: None,
+                    operation: None,
+                    condition: None,
+                    async_boundary: None,
+                    provenance: Vec::new(),
+                },
+            ],
+        };
+
+        let body_ctx = query_context(&graph, "body").unwrap();
+        assert_eq!(body_ctx.reads.len(), 1);
+        assert_eq!(body_ctx.reads[0].name, "canShowGameRoom");
+        assert_eq!(body_ctx.invalidation_sources.len(), 1);
+        assert_eq!(body_ctx.invalidation_sources[0].name, "roomMode");
+
+        let property_ctx = query_context(&graph, "canShowGameRoom").unwrap();
+        assert_eq!(property_ctx.read_by.len(), 1);
+        assert_eq!(property_ctx.read_by[0].name, "body");
+        assert_eq!(property_ctx.invalidation_sources.len(), 1);
+        assert_eq!(property_ctx.invalidation_sources[0].name, "roomMode");
+
+        let source_ctx = query_context(&graph, "roomMode").unwrap();
+        assert_eq!(source_ctx.invalidation_sources.len(), 1);
+        assert_eq!(source_ctx.invalidation_sources[0].name, "roomMode");
     }
 
     #[test]

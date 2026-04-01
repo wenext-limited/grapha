@@ -85,7 +85,11 @@ pub fn query_impact(
     for edge in &graph.edges {
         if !matches!(
             edge.kind,
-            EdgeKind::Calls | EdgeKind::Implements | EdgeKind::TypeRef | EdgeKind::Inherits
+            EdgeKind::Calls
+                | EdgeKind::Reads
+                | EdgeKind::Implements
+                | EdgeKind::TypeRef
+                | EdgeKind::Inherits
         ) {
             continue;
         }
@@ -249,6 +253,65 @@ mod tests {
         let result = query_impact(&graph, "d", 1).unwrap();
         assert_eq!(result.depth_1.len(), 1);
         assert_eq!(result.total_affected, 1);
+    }
+
+    #[test]
+    fn impact_traverses_read_dependencies() {
+        let mk = |id: &str, name: &str| Node {
+            id: id.into(),
+            kind: NodeKind::Property,
+            name: name.into(),
+            file: "view.swift".into(),
+            span: Span {
+                start: [0, 0],
+                end: [1, 0],
+            },
+            visibility: Visibility::Public,
+            metadata: StdHashMap::new(),
+            role: None,
+            signature: None,
+            doc_comment: None,
+            module: None,
+        };
+
+        let graph = Graph {
+            version: "0.1.0".to_string(),
+            nodes: vec![
+                mk("view.swift::RoomPage::roomMode", "roomMode"),
+                mk("view.swift::RoomPage::canShowGameRoom", "canShowGameRoom"),
+                mk("view.swift::RoomPage::body", "body"),
+            ],
+            edges: vec![
+                Edge {
+                    source: "view.swift::RoomPage::canShowGameRoom".into(),
+                    target: "view.swift::RoomPage::roomMode".into(),
+                    kind: EdgeKind::Reads,
+                    confidence: 0.85,
+                    direction: None,
+                    operation: None,
+                    condition: None,
+                    async_boundary: None,
+                    provenance: Vec::new(),
+                },
+                Edge {
+                    source: "view.swift::RoomPage::body".into(),
+                    target: "view.swift::RoomPage::canShowGameRoom".into(),
+                    kind: EdgeKind::Reads,
+                    confidence: 0.85,
+                    direction: None,
+                    operation: None,
+                    condition: None,
+                    async_boundary: None,
+                    provenance: Vec::new(),
+                },
+            ],
+        };
+
+        let result = query_impact(&graph, "roomMode", 5).unwrap();
+        assert_eq!(result.depth_1.len(), 1);
+        assert_eq!(result.depth_1[0].name, "canShowGameRoom");
+        assert_eq!(result.depth_2.len(), 1);
+        assert_eq!(result.depth_2[0].name, "body");
     }
 
     #[test]
