@@ -140,7 +140,11 @@ Match source references to catalog records:
 
 1. **Exact name match** — `"icon_gift"` matches record with `name: "icon_gift"`
 2. **Path match** — `"Room/voiceWave"` matches record with `name: "voiceWave"` and `group_path` containing `Room`
-3. **Suffix match** — `"voiceWave"` matches any record where `name == "voiceWave"`, disambiguated by group_path proximity
+3. **Suffix match** — `"voiceWave"` matches any record where `name == "voiceWave"`, disambiguated by proximity
+
+### Closest Bundle (Proximity Matching)
+
+Same as l10n: when multiple `.xcassets` catalogs contain an image set with the same name, prefer the catalog closest to the referencing file. Uses the same `directory_distance()` function from `localization.rs` — rank matches by filesystem distance between the usage file and the catalog directory. Feature-local catalogs win over root-level ones.
 
 ---
 
