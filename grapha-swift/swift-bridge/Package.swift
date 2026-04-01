@@ -33,5 +33,9 @@ let package = Package(
                 ]),
             ]
         ),
+        .testTarget(
+            name: "GraphaSwiftBridgeTests",
+            dependencies: ["GraphaSwiftBridge"]
+        ),
     ]
 )

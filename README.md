@@ -367,6 +367,8 @@ cargo clippy                   # Lint
 cargo fmt                      # Format
 ```
 
+`grapha-swift` defaults to `GRAPHA_SWIFT_BRIDGE_MODE=auto`, which builds the Swift bridge when possible and falls back cleanly when it is unavailable. See `docs/swift-developer-workflow.md` for the explicit `auto` / `off` / `required` modes, local bridge-on and bridge-off commands, and the `lama-ludo-ios` validation flow.
+
 ## License
 
 MIT

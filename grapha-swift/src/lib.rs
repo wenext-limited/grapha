@@ -7,9 +7,10 @@ mod module_discovery;
 mod swiftsyntax;
 mod treesitter;
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{LazyLock, RwLock};
 use std::time::Instant;
 
 /// Thread-summed timing counters (nanoseconds) for extraction phases.
@@ -31,7 +32,8 @@ use grapha_core::{
     LanguageRegistry, ModuleMap, ProjectContext,
 };
 
-static INDEX_STORE_PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
+static INDEX_STORE_PATHS: LazyLock<RwLock<HashMap<PathBuf, Option<PathBuf>>>> =
+    LazyLock::new(|| RwLock::new(HashMap::new()));
 
 pub struct SwiftPlugin;
 
@@ -45,7 +47,7 @@ impl LanguagePlugin for SwiftPlugin {
     }
 
     fn prepare_project(&self, context: &ProjectContext) -> anyhow::Result<()> {
-        init_index_store(&context.project_root);
+        prepare_project_index_store(&context.project_root);
         Ok(())
     }
 
@@ -153,28 +155,114 @@ fn discover_index_store(start_path: &Path) -> Option<PathBuf> {
 /// Pre-discover the index store path. Call before starting extraction
 /// to ensure the discovery log appears before the progress bar.
 pub fn init_index_store(project_root: &Path) {
-    INDEX_STORE_PATH.get_or_init(|| {
-        if let Some(store) = discover_index_store(project_root) {
-            return Some(store);
-        }
-        let mut dir = if project_root.is_file() {
-            project_root.parent().map(Path::to_path_buf)
-        } else {
-            Some(project_root.to_path_buf())
-        };
-        while let Some(d) = dir {
-            if let Some(store) = discover_index_store(&d) {
-                return Some(store);
-            }
-            dir = d.parent().map(Path::to_path_buf);
-        }
-        None
-    });
+    let _ = init_index_store_with(&INDEX_STORE_PATHS, project_root, discover_index_store);
 }
 
-/// Get the discovered index store path, if any.
-pub fn index_store_path() -> Option<&'static Path> {
-    INDEX_STORE_PATH.get().and_then(|p| p.as_deref())
+fn prepare_project_index_store(project_root: &Path) {
+    prepare_project_with(&INDEX_STORE_PATHS, project_root, discover_index_store);
+}
+
+fn prepare_project_with<F>(
+    cache: &RwLock<HashMap<PathBuf, Option<PathBuf>>>,
+    project_root: &Path,
+    discover: F,
+) where
+    F: FnMut(&Path) -> Option<PathBuf>,
+{
+    let _ = refresh_index_store_with(cache, project_root, discover);
+}
+
+/// Force index-store rediscovery for a project, including after a cached miss.
+pub fn refresh_index_store(project_root: &Path) -> Option<PathBuf> {
+    refresh_index_store_with(&INDEX_STORE_PATHS, project_root, discover_index_store)
+}
+
+fn init_index_store_with<F>(
+    cache: &RwLock<HashMap<PathBuf, Option<PathBuf>>>,
+    project_root: &Path,
+    discover: F,
+) -> Option<PathBuf>
+where
+    F: FnMut(&Path) -> Option<PathBuf>,
+{
+    let key = project_cache_key(project_root);
+    if let Some(existing) = cached_index_store_path_in(cache, &key) {
+        return existing;
+    }
+
+    let discovered = discover_index_store_with(&key, discover);
+
+    cache
+        .write()
+        .expect("index-store cache poisoned")
+        .entry(key)
+        .or_insert_with(|| discovered.clone());
+
+    discovered
+}
+
+fn refresh_index_store_with<F>(
+    cache: &RwLock<HashMap<PathBuf, Option<PathBuf>>>,
+    project_root: &Path,
+    discover: F,
+) -> Option<PathBuf>
+where
+    F: FnMut(&Path) -> Option<PathBuf>,
+{
+    cache
+        .write()
+        .expect("index-store cache poisoned")
+        .remove(&project_cache_key(project_root));
+    init_index_store_with(cache, project_root, discover)
+}
+
+fn project_cache_key(project_root: &Path) -> PathBuf {
+    if project_root.extension().is_some_and(|ext| ext == "swift") {
+        project_root.parent().unwrap_or(project_root).to_path_buf()
+    } else {
+        project_root.to_path_buf()
+    }
+}
+
+pub fn index_store_path(project_root: &Path) -> Option<PathBuf> {
+    index_store_path_in(&INDEX_STORE_PATHS, project_root)
+}
+
+fn index_store_path_in(
+    cache: &RwLock<HashMap<PathBuf, Option<PathBuf>>>,
+    project_root: &Path,
+) -> Option<PathBuf> {
+    cached_index_store_path_in(cache, project_root).flatten()
+}
+
+fn cached_index_store_path_in(
+    cache: &RwLock<HashMap<PathBuf, Option<PathBuf>>>,
+    project_root: &Path,
+) -> Option<Option<PathBuf>> {
+    cache
+        .read()
+        .expect("index-store cache poisoned")
+        .get(&project_cache_key(project_root))
+        .cloned()
+}
+
+fn discover_index_store_with<F>(start_path: &Path, mut discover: F) -> Option<PathBuf>
+where
+    F: FnMut(&Path) -> Option<PathBuf>,
+{
+    if let Some(store) = discover(start_path) {
+        return Some(store);
+    }
+
+    let mut dir = start_path.parent().map(Path::to_path_buf);
+    while let Some(candidate) = dir {
+        if let Some(store) = discover(&candidate) {
+            return Some(store);
+        }
+        dir = candidate.parent().map(Path::to_path_buf);
+    }
+
+    None
 }
 
 fn stamp_swift_module(result: ExtractionResult, module_name: Option<&str>) -> ExtractionResult {
@@ -268,17 +356,17 @@ fn source_contains_asset_markers(source: &[u8]) -> bool {
 pub fn extract_swift(
     source: &[u8],
     file_path: &Path,
-    index_store_path: Option<&Path>,
+    explicit_index_store_path: Option<&Path>,
     project_root: Option<&Path>,
 ) -> anyhow::Result<ExtractionResult> {
-    // Use explicit path, pre-discovered path, or auto-discover
     if let Some(root) = project_root {
         init_index_store(root);
     }
-    let effective_store =
-        index_store_path.or_else(|| INDEX_STORE_PATH.get().and_then(|p| p.as_deref()));
+    let effective_store = explicit_index_store_path
+        .map(Path::to_path_buf)
+        .or_else(|| project_root.and_then(index_store_path));
 
-    if let Some(store_path) = effective_store {
+    if let Some(store_path) = effective_store.as_deref() {
         // Index store needs absolute file path for matching
         let abs_file = if file_path.is_absolute() {
             file_path.to_path_buf()
@@ -314,37 +402,52 @@ pub fn extract_swift(
             if needs_parse {
                 let t_parse = Instant::now();
                 let tree_result = treesitter::parse_swift(source);
-                TIMING_TS_PARSE_NS.fetch_add(t_parse.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                TIMING_TS_PARSE_NS
+                    .fetch_add(t_parse.elapsed().as_nanos() as u64, Ordering::Relaxed);
 
                 if let Ok(tree) = tree_result {
                     if needs_doc {
                         let t_doc = Instant::now();
-                        let _ = treesitter::enrich_doc_comments_with_tree(source, &tree, &mut result);
-                        TIMING_TS_DOC_NS.fetch_add(t_doc.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                        let _ =
+                            treesitter::enrich_doc_comments_with_tree(source, &tree, &mut result);
+                        TIMING_TS_DOC_NS
+                            .fetch_add(t_doc.elapsed().as_nanos() as u64, Ordering::Relaxed);
                     }
 
                     if has_swiftui {
                         let t_swiftui = Instant::now();
                         let _ = treesitter::enrich_swiftui_structure_with_tree(
-                            source, file_path, &tree, &mut result,
+                            source,
+                            file_path,
+                            &tree,
+                            &mut result,
                         );
-                        TIMING_TS_SWIFTUI_NS.fetch_add(t_swiftui.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                        TIMING_TS_SWIFTUI_NS
+                            .fetch_add(t_swiftui.elapsed().as_nanos() as u64, Ordering::Relaxed);
                     }
 
                     if has_l10n {
                         let t_l10n = Instant::now();
                         let _ = treesitter::enrich_localization_metadata_with_tree(
-                            source, file_path, &tree, &mut result,
+                            source,
+                            file_path,
+                            &tree,
+                            &mut result,
                         );
-                        TIMING_TS_L10N_NS.fetch_add(t_l10n.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                        TIMING_TS_L10N_NS
+                            .fetch_add(t_l10n.elapsed().as_nanos() as u64, Ordering::Relaxed);
                     }
 
                     if has_assets {
                         let t_asset = Instant::now();
                         let _ = treesitter::enrich_asset_references_with_tree(
-                            source, file_path, &tree, &mut result,
+                            source,
+                            file_path,
+                            &tree,
+                            &mut result,
                         );
-                        TIMING_TS_ASSET_NS.fetch_add(t_asset.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                        TIMING_TS_ASSET_NS
+                            .fetch_add(t_asset.elapsed().as_nanos() as u64, Ordering::Relaxed);
                     }
                 }
             }
@@ -362,13 +465,22 @@ pub fn extract_swift(
             let t_enrich = Instant::now();
             let _ = treesitter::enrich_doc_comments_with_tree(source, &tree, &mut result);
             let _ = treesitter::enrich_swiftui_structure_with_tree(
-                source, file_path, &tree, &mut result,
+                source,
+                file_path,
+                &tree,
+                &mut result,
             );
             let _ = treesitter::enrich_localization_metadata_with_tree(
-                source, file_path, &tree, &mut result,
+                source,
+                file_path,
+                &tree,
+                &mut result,
             );
             let _ = treesitter::enrich_asset_references_with_tree(
-                source, file_path, &tree, &mut result,
+                source,
+                file_path,
+                &tree,
+                &mut result,
             );
             TIMING_TS_ENRICH_NS.fetch_add(t_enrich.elapsed().as_nanos() as u64, Ordering::Relaxed);
         }
@@ -379,12 +491,53 @@ pub fn extract_swift(
     let t_fb = Instant::now();
     let extractor = SwiftExtractor;
     let mut result = extractor.extract(source, file_path)?;
-    let _ = treesitter::enrich_localization_metadata(source, file_path, &mut result);
-    if source_contains_asset_markers(source) {
-        let tree = treesitter::parse_swift(source)?;
-        let _ = treesitter::enrich_asset_references_with_tree(source, file_path, &tree, &mut result);
-    }
+    enrich_fallback_result(source, file_path, &mut result)?;
     TIMING_TS_FALLBACK_NS.fetch_add(t_fb.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    Ok(result)
+}
+
+fn enrich_fallback_result(
+    source: &[u8],
+    file_path: &Path,
+    result: &mut ExtractionResult,
+) -> anyhow::Result<()> {
+    let has_swiftui = source_contains_swiftui_markers(source);
+    let has_l10n = source_contains_l10n_markers(source);
+    let has_assets = source_contains_asset_markers(source);
+    let needs_tree = has_swiftui || has_l10n || has_assets;
+
+    if !needs_tree {
+        return Ok(());
+    }
+
+    let t_parse = Instant::now();
+    let tree = treesitter::parse_swift(source)?;
+    TIMING_TS_PARSE_NS.fetch_add(t_parse.elapsed().as_nanos() as u64, Ordering::Relaxed);
+
+    let t_enrich = Instant::now();
+    if has_swiftui {
+        let _ = treesitter::enrich_swiftui_structure_with_tree(source, file_path, &tree, result);
+    }
+    if has_l10n {
+        let _ =
+            treesitter::enrich_localization_metadata_with_tree(source, file_path, &tree, result);
+    }
+    if has_assets {
+        let _ = treesitter::enrich_asset_references_with_tree(source, file_path, &tree, result);
+    }
+    TIMING_TS_ENRICH_NS.fetch_add(t_enrich.elapsed().as_nanos() as u64, Ordering::Relaxed);
+
+    Ok(())
+}
+
+#[doc(hidden)]
+pub fn extract_swift_via_fallback_for_tests(
+    source: &[u8],
+    file_path: &Path,
+) -> anyhow::Result<ExtractionResult> {
+    let extractor = SwiftExtractor;
+    let mut result = extractor.extract(source, file_path)?;
+    enrich_fallback_result(source, file_path, &mut result)?;
     Ok(result)
 }
 
@@ -451,5 +604,147 @@ mod plugin_tests {
             "s:4main7package18PackageDescription0C0Cvg@@module:Feature"
         );
         assert_eq!(stamped.nodes[0].module.as_deref(), Some("Feature"));
+    }
+}
+
+#[cfg(test)]
+mod discovery_cache_tests {
+    use super::{
+        index_store_path_in, init_index_store_with, prepare_project_with, project_cache_key,
+        refresh_index_store_with,
+    };
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+    use std::sync::RwLock;
+
+    #[test]
+    fn normalizes_file_roots_to_parent_directory() {
+        assert_eq!(
+            project_cache_key(Path::new("/tmp/MyApp/Sources/File.swift")),
+            std::path::PathBuf::from("/tmp/MyApp/Sources")
+        );
+    }
+
+    #[test]
+    fn keeps_directory_roots_stable() {
+        assert_eq!(
+            project_cache_key(Path::new("/tmp/MyApp")),
+            std::path::PathBuf::from("/tmp/MyApp")
+        );
+    }
+
+    #[test]
+    fn caches_an_initial_miss() {
+        let cache = RwLock::new(HashMap::new());
+        let project = Path::new("/tmp/MyApp");
+        let mut first_attempts = 0;
+        let mut second_attempts = 0;
+
+        assert_eq!(
+            init_index_store_with(&cache, project, |_| {
+                first_attempts += 1;
+                None
+            }),
+            None
+        );
+        assert!(first_attempts > 0);
+        assert_eq!(index_store_path_in(&cache, project), None);
+
+        assert_eq!(
+            init_index_store_with(&cache, project, |_| {
+                second_attempts += 1;
+                Some(PathBuf::from("/tmp/DerivedData/Store"))
+            }),
+            None
+        );
+        assert_eq!(second_attempts, 0);
+        assert_eq!(index_store_path_in(&cache, project), None);
+    }
+
+    #[test]
+    fn explicit_refresh_allows_rediscovery_after_a_cached_miss() {
+        let cache = RwLock::new(HashMap::new());
+        let project = Path::new("/tmp/MyApp");
+        let expected = PathBuf::from("/tmp/DerivedData/Store");
+        let mut first_attempts = 0;
+        let mut refresh_attempts = 0;
+
+        assert_eq!(
+            init_index_store_with(&cache, project, |_| {
+                first_attempts += 1;
+                None
+            }),
+            None
+        );
+        assert!(first_attempts > 0);
+        assert_eq!(index_store_path_in(&cache, project), None);
+
+        assert_eq!(
+            refresh_index_store_with(&cache, project, |_| {
+                refresh_attempts += 1;
+                Some(expected.clone())
+            }),
+            Some(expected.clone())
+        );
+        assert!(refresh_attempts > 0);
+        assert_eq!(index_store_path_in(&cache, project), Some(expected));
+    }
+
+    #[test]
+    fn prepare_project_refreshes_a_cached_miss() {
+        let cache = RwLock::new(HashMap::new());
+        let project = Path::new("/tmp/MyApp");
+        let expected = PathBuf::from("/tmp/DerivedData/Store");
+        let mut initial_attempts = 0;
+        let mut prepare_attempts = 0;
+
+        assert_eq!(
+            init_index_store_with(&cache, project, |_| {
+                initial_attempts += 1;
+                None
+            }),
+            None
+        );
+        assert!(initial_attempts > 0);
+        assert_eq!(index_store_path_in(&cache, project), None);
+
+        prepare_project_with(&cache, project, |_| {
+            prepare_attempts += 1;
+            Some(expected.clone())
+        });
+
+        assert!(prepare_attempts > 0);
+        assert_eq!(index_store_path_in(&cache, project), Some(expected));
+    }
+
+    #[test]
+    fn cached_miss_for_one_project_does_not_block_other_project_discovery() {
+        let cache = RwLock::new(HashMap::new());
+        let project_a = Path::new("/tmp/MyAppA");
+        let project_b = Path::new("/tmp/MyAppB");
+        let expected = PathBuf::from("/tmp/DerivedData/StoreB");
+        let mut project_a_attempts = 0;
+        let mut project_b_attempts = 0;
+
+        assert_eq!(
+            init_index_store_with(&cache, project_a, |_| {
+                project_a_attempts += 1;
+                None
+            }),
+            None
+        );
+        assert!(project_a_attempts > 0);
+        assert_eq!(index_store_path_in(&cache, project_a), None);
+
+        assert_eq!(
+            init_index_store_with(&cache, project_b, |_| {
+                project_b_attempts += 1;
+                Some(expected.clone())
+            }),
+            Some(expected.clone())
+        );
+        assert!(project_b_attempts > 0);
+        assert_eq!(index_store_path_in(&cache, project_a), None);
+        assert_eq!(index_store_path_in(&cache, project_b), Some(expected));
     }
 }

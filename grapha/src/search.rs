@@ -275,7 +275,10 @@ pub fn search_filtered(
         // "giftpanelviewmodel" via substring, unlike FuzzyTermQuery which
         // requires the entire token to be within edit distance.
         let pattern = build_fuzzy_regex(query_str);
-        Box::new(tantivy::query::RegexQuery::from_pattern(&pattern, fields.name_lower)?)
+        Box::new(tantivy::query::RegexQuery::from_pattern(
+            &pattern,
+            fields.name_lower,
+        )?)
     } else {
         let query_parser = QueryParser::for_index(index, vec![fields.name, fields.file]);
         Box::new(query_parser.parse_query(query_str)?)

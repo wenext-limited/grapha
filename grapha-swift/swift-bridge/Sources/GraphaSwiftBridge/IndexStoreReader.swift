@@ -24,6 +24,11 @@ private func str(_ ref: indexstore_string_ref_t) -> String {
     )
 }
 
+@_silgen_name("indexstore_unit_dependency_get_modulename")
+private func indexstore_unit_dependency_get_modulename_shim(
+    _ dependency: indexstore_unit_dependency_t?
+) -> indexstore_string_ref_t
+
 // MARK: - Extracted Data
 
 /// Node data collected from index store. Strings use interned offsets
@@ -36,8 +41,15 @@ private struct ExtractedNode {
     let file: String    // shared across all nodes in same file (CoW)
     let line: UInt32
     let col: UInt32
+    let endLine: UInt32
+    let endCol: UInt32
     let visibility: UInt8
     let module: String? // shared across all nodes in same file (CoW)
+}
+
+private struct ExtractedImport: Hashable {
+    let path: String
+    let kind: UInt8
 }
 
 private struct ExtractedEdge: Hashable {
@@ -63,6 +75,7 @@ private final class OccCollector: @unchecked Sendable {
     var nodes: [String: ExtractedNode]
     /// Set gives O(1) insertion with automatic deduplication (no post-pass needed).
     var edges: Set<ExtractedEdge>
+    var imports: [ExtractedImport]
     let fileName: String
     let moduleName: String?
 
@@ -73,6 +86,7 @@ private final class OccCollector: @unchecked Sendable {
         // Typical Swift file: ~50-100 symbols, ~200-500 edges.
         self.nodes = Dictionary(minimumCapacity: 128)
         self.edges = Set(minimumCapacity: 512)
+        self.imports = []
     }
 }
 
@@ -87,6 +101,7 @@ private let _buildIndexLock = Mutex<Void>(())
 nonisolated(unsafe) private var _cbStore: indexstore_t? = nil
 nonisolated(unsafe) private var _cbFileIndex: [String: UnitInfo] = [:]
 nonisolated(unsafe) private var _cbRecordName: String? = nil
+nonisolated(unsafe) private var _cbImports: [ExtractedImport] = []
 
 /// Per-extraction context passed through the `ctx` pointer of _apply_f callbacks.
 /// This eliminates global mutable state, allowing concurrent extractions.
@@ -106,6 +121,7 @@ private struct UnitInfo {
     let unitName: String
     let moduleName: String?
     let recordName: String?
+    let imports: [ExtractedImport]
 }
 
 // MARK: - File-level dependency callback
@@ -116,7 +132,16 @@ private func _collectRecordName(_ ctx: UnsafeMutableRawPointer?, _ dep: indexsto
     if indexstore_unit_dependency_get_kind(dep) == 2 {
         let name = str(indexstore_unit_dependency_get_name(dep))
         if !name.isEmpty { _cbRecordName = name }
+        return true
     }
+
+    let moduleName = str(indexstore_unit_dependency_get_modulename_shim(dep))
+    if !moduleName.isEmpty,
+        !_cbImports.contains(where: { $0.path == moduleName && $0.kind == BinaryImportKind.module })
+    {
+        _cbImports.append(ExtractedImport(path: moduleName, kind: BinaryImportKind.module))
+    }
+
     return true
 }
 
@@ -170,7 +195,11 @@ final class IndexStoreReader: @unchecked Sendable {
             moduleName: unitInfo.moduleName
         )
 
-        return buildBinaryBuffer(nodes: collector.nodes.values, edges: collector.edges)
+        return buildBinaryBuffer(
+            nodes: collector.nodes.values,
+            edges: collector.edges,
+            imports: unitInfo.imports
+        )
     }
 
     // MARK: - File Index (built once)
@@ -194,12 +223,14 @@ final class IndexStoreReader: @unchecked Sendable {
 
             // Collect record name while reader is already open (avoids reopening on every extractFile call)
             _cbRecordName = nil
+            _cbImports = []
             _ = indexstore_unit_reader_dependencies_apply_f(reader, nil, _collectRecordName)
 
             _cbFileIndex[mainFile] = UnitInfo(
                 unitName: unitName,
                 moduleName: mod.isEmpty ? nil : mod,
-                recordName: _cbRecordName
+                recordName: _cbRecordName,
+                imports: _cbImports
             )
             return true
         }
@@ -259,13 +290,19 @@ private func processOccurrence(ctx: ExtractionContext, occ: indexstore_occurrenc
     var line: UInt32 = 0
     var col: UInt32 = 0
     indexstore_occurrence_get_line_col(occ, &line, &col)
+    let (endLine, endCol) = resolvedEndPosition(startLine: line, startCol: col, exactEnd: nil)
 
     // Record definitions/declarations as nodes
     let isDefOrDecl = (roles & Roles.definition) != 0 || (roles & Roles.declaration) != 0
     if isDefOrDecl, let kind = mapSymbolKind(kindRaw) {
         c.nodes[usr] = ExtractedNode(
             id: usr, kind: kind, name: name, file: c.fileName,
-            line: line, col: col, visibility: 0, module: c.moduleName
+            line: line,
+            col: col,
+            endLine: endLine,
+            endCol: endCol,
+            visibility: 0,
+            module: c.moduleName
         )
     }
 
@@ -371,6 +408,10 @@ private struct BinaryEdgeKind {
     static let typeRef: UInt8 = 4
 }
 
+private struct BinaryImportKind {
+    static let module: UInt8 = 2
+}
+
 // MARK: - Helpers
 
 private func resolvePath(_ path: String) -> String {
@@ -382,19 +423,57 @@ private func resolvePath(_ path: String) -> String {
     return URL(fileURLWithPath: path).standardized.path
 }
 
+private func resolvedEndPosition(
+    startLine: UInt32,
+    startCol: UInt32,
+    exactEnd: (UInt32, UInt32)?
+) -> (UInt32, UInt32) {
+    exactEnd ?? (startLine, startCol)
+}
+
+func resolvedEndPositionForTests(
+    startLine: UInt32,
+    startCol: UInt32,
+    exactEnd: (UInt32, UInt32)?
+) -> (UInt32, UInt32) {
+    resolvedEndPosition(startLine: startLine, startCol: startCol, exactEnd: exactEnd)
+}
+
 private let BINARY_MAGIC: UInt32 = 0x47524148
-private let BINARY_VERSION: UInt8 = 1
-private let HEADER_SIZE = 20
-private let PACKED_NODE_SIZE = 44
+private let BINARY_VERSION: UInt8 = 2
+private let HEADER_SIZE = 24
+private let PACKED_NODE_SIZE = 52
 private let PACKED_EDGE_SIZE = 20
+private let PACKED_IMPORT_SIZE = 12
 private let NO_MODULE: UInt32 = 0xFFFFFFFF
+
+func makeBinaryFixtureForTests() -> (UnsafeMutableRawPointer, UInt32) {
+    let node = ExtractedNode(
+        id: "usr://demo",
+        kind: 0,
+        name: "Demo",
+        file: "File.swift",
+        line: 4,
+        col: 2,
+        endLine: 4,
+        endCol: 15,
+        visibility: 0,
+        module: nil
+    )
+    let imports = [ExtractedImport(path: "Foundation", kind: BinaryImportKind.module)]
+    let nodes = Dictionary(uniqueKeysWithValues: [(node.id, node)])
+    return buildBinaryBuffer(nodes: nodes.values, edges: [], imports: imports)
+}
 
 private func buildBinaryBuffer(
     nodes: Dictionary<String, ExtractedNode>.Values,
-    edges: Set<ExtractedEdge>
+    edges: Set<ExtractedEdge>,
+    imports: [ExtractedImport]
 ) -> (UnsafeMutableRawPointer, UInt32) {
     // Phase 1: build string table with deduplication
-    let estimatedStrings = nodes.count * 3 + edges.count * 2
+    let nodeList = Array(nodes)
+    let edgeList = Array(edges)
+    let estimatedStrings = nodeList.count * 3 + edgeList.count * 2 + imports.count
     var stringTable = Data()
     stringTable.reserveCapacity(estimatedStrings * 32) // avg ~32 bytes per string
     var stringIndex: [String: (UInt32, UInt32)] = Dictionary(minimumCapacity: estimatedStrings)
@@ -422,28 +501,38 @@ private func buildBinaryBuffer(
     }
 
     // Pre-intern all strings (nodes first, then edges reuse via dedup)
-    var nodeRefs: [(id: (UInt32, UInt32), name: (UInt32, UInt32), file: (UInt32, UInt32), module: (UInt32, UInt32)?)] = []
-    nodeRefs.reserveCapacity(nodes.count)
-    for n in nodes {
+    var nodeRefs: [(id: (UInt32, UInt32), name: (UInt32, UInt32), file: (UInt32, UInt32), module: (UInt32, UInt32)?, line: UInt32, col: UInt32, endLine: UInt32, endCol: UInt32, kind: UInt8, visibility: UInt8)] = []
+    nodeRefs.reserveCapacity(nodeList.count)
+    for n in nodeList {
         let idRef = intern(n.id)
         let nameRef = intern(n.name)
         let fileRef = intern(n.file)
         let modRef = n.module.map { intern($0) }
-        nodeRefs.append((idRef, nameRef, fileRef, modRef))
+        nodeRefs.append((idRef, nameRef, fileRef, modRef, n.line, n.col, n.endLine, n.endCol, n.kind, n.visibility))
     }
 
     var edgeRefs: [(source: (UInt32, UInt32), target: (UInt32, UInt32), kind: UInt8, confidencePct: UInt8)] = []
-    edgeRefs.reserveCapacity(edges.count)
-    for e in edges {
+    edgeRefs.reserveCapacity(edgeList.count)
+    for e in edgeList {
         let srcRef = intern(e.source)
         let tgtRef = intern(e.target)
         edgeRefs.append((srcRef, tgtRef, e.kind, e.confidencePct))
     }
 
+    var importRefs: [(path: (UInt32, UInt32), kind: UInt8)] = []
+    importRefs.reserveCapacity(imports.count)
+    for entry in imports {
+        importRefs.append((intern(entry.path), entry.kind))
+    }
+
     // Phase 2: allocate and write buffer
-    let nodeCount = UInt32(nodes.count)
+    let nodeCount = UInt32(nodeRefs.count)
     let edgeCount = UInt32(edgeRefs.count)
-    let strTableOffset = UInt32(HEADER_SIZE + nodes.count * PACKED_NODE_SIZE + edgeRefs.count * PACKED_EDGE_SIZE)
+    let importCount = UInt32(importRefs.count)
+    let strTableOffset = UInt32(
+        HEADER_SIZE + nodeRefs.count * PACKED_NODE_SIZE + edgeRefs.count * PACKED_EDGE_SIZE
+            + importRefs.count * PACKED_IMPORT_SIZE
+    )
     let totalSize = Int(strTableOffset) + stringTable.count
 
     let buf = malloc(totalSize)!  // must use malloc — freed via free() across FFI
@@ -468,23 +557,25 @@ private func buildBinaryBuffer(
     pad(3)
     writeU32(nodeCount)
     writeU32(edgeCount)
+    writeU32(importCount)
     writeU32(strTableOffset)
 
     // Nodes
-    for (i, n) in nodes.enumerated() {
-        let refs = nodeRefs[i]
-        writeU32(refs.id.0); writeU32(refs.id.1)
-        writeU32(refs.name.0); writeU32(refs.name.1)
-        writeU32(refs.file.0); writeU32(refs.file.1)
-        if let m = refs.module {
+    for node in nodeRefs {
+        writeU32(node.id.0); writeU32(node.id.1)
+        writeU32(node.name.0); writeU32(node.name.1)
+        writeU32(node.file.0); writeU32(node.file.1)
+        if let m = node.module {
             writeU32(m.0); writeU32(m.1)
         } else {
             writeU32(NO_MODULE); writeU32(0)
         }
-        writeU32(n.line)
-        writeU32(n.col)
-        writeU8(n.kind)
-        writeU8(n.visibility)
+        writeU32(node.line)
+        writeU32(node.col)
+        writeU32(node.endLine)
+        writeU32(node.endCol)
+        writeU8(node.kind)
+        writeU8(node.visibility)
         pad(2)
     }
 
@@ -495,6 +586,12 @@ private func buildBinaryBuffer(
         writeU8(ref.kind)
         writeU8(ref.confidencePct)
         pad(2)
+    }
+
+    for entry in importRefs {
+        writeU32(entry.path.0); writeU32(entry.path.1)
+        writeU8(entry.kind)
+        pad(3)
     }
 
     // String table

@@ -596,6 +596,7 @@ fn extract_enum(
     for child in node.named_children(&mut cursor) {
         if child.kind() == "enum_class_body" {
             extract_enum_entries(child, source, file, module_path, &id, result);
+            walk_children(child, source, file, module_path, Some(&id), result);
         }
     }
 }
@@ -1375,6 +1376,80 @@ fn detect_swift_async_boundary(node: tree_sitter::Node, source: &[u8]) -> Option
 }
 
 /// Extract inheritance/conformance edges from `inheritance_specifier` children.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TypeDeclarationKind {
+    Class,
+    Protocol,
+}
+
+fn root_node(mut node: tree_sitter::Node) -> tree_sitter::Node {
+    while let Some(parent) = node.parent() {
+        node = parent;
+    }
+    node
+}
+
+fn collect_type_declaration_kinds(
+    node: tree_sitter::Node,
+    source: &[u8],
+    out: &mut HashMap<String, TypeDeclarationKind>,
+) {
+    match node.kind() {
+        "class_declaration" => {
+            if matches!(
+                detect_class_declaration_type(node),
+                ClassDeclarationType::Class
+            ) && let Some(name) = type_identifier_text(node, source)
+            {
+                out.insert(name, TypeDeclarationKind::Class);
+            }
+        }
+        "protocol_declaration" => {
+            if let Some(name) = type_identifier_text(node, source) {
+                out.insert(name, TypeDeclarationKind::Protocol);
+            }
+        }
+        _ => {}
+    }
+
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_type_declaration_kinds(child, source, out);
+    }
+}
+
+fn is_known_external_protocol_name(name: &str) -> bool {
+    matches!(
+        name,
+        "Actor"
+            | "AnyObject"
+            | "CaseIterable"
+            | "Codable"
+            | "Decodable"
+            | "Encodable"
+            | "Equatable"
+            | "Error"
+            | "Hashable"
+            | "Identifiable"
+            | "Observable"
+            | "ObservableObject"
+            | "RawRepresentable"
+            | "Sendable"
+            | "View"
+    )
+}
+
+fn is_likely_external_class_name(name: &str) -> bool {
+    name.starts_with("NS")
+        || name.starts_with("UI")
+        || name.ends_with("Controller")
+        || name.ends_with("ViewController")
+        || name.ends_with("View")
+        || name.ends_with("Object")
+        || name.ends_with("Responder")
+        || name.ends_with("Window")
+}
+
 fn extract_inheritance_edges(
     node: tree_sitter::Node,
     source: &[u8],
@@ -1383,25 +1458,70 @@ fn extract_inheritance_edges(
     type_id: &str,
     result: &mut ExtractionResult,
 ) {
+    let owner_kind = node.kind();
+    let mut declaration_kinds = HashMap::new();
+    collect_type_declaration_kinds(root_node(node), source, &mut declaration_kinds);
+    let mut inheritance_specifiers = Vec::new();
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
-        if child.kind() == "inheritance_specifier"
-            && let Some(inherited_name) =
-                find_user_type_name(child, source).or_else(|| type_identifier_text(child, source))
-        {
-            let target_id = make_id(file, module_path, &inherited_name);
-            result.edges.push(Edge {
-                source: type_id.to_string(),
-                target: target_id,
-                kind: EdgeKind::Implements,
-                confidence: 0.9,
-                direction: None,
-                operation: None,
-                condition: None,
-                async_boundary: None,
-                provenance: node_edge_provenance(file, child, type_id),
-            });
+        if child.kind() != "inheritance_specifier" {
+            continue;
         }
+
+        let Some(inherited_name) =
+            find_user_type_name(child, source).or_else(|| type_identifier_text(child, source))
+        else {
+            continue;
+        };
+
+        inheritance_specifiers.push((child, inherited_name));
+    }
+
+    let resolved_class_parent = if owner_kind == "class_declaration" {
+        inheritance_specifiers
+            .iter()
+            .position(|(_, inherited_name)| {
+                declaration_kinds.get(inherited_name) == Some(&TypeDeclarationKind::Class)
+            })
+    } else {
+        None
+    };
+    let inferred_external_class_parent = if owner_kind == "class_declaration"
+        && resolved_class_parent.is_none()
+        && inheritance_specifiers.len() > 1
+        && declaration_kinds.get(&inheritance_specifiers[0].1) != Some(&TypeDeclarationKind::Protocol)
+        && !is_known_external_protocol_name(&inheritance_specifiers[0].1)
+        && is_likely_external_class_name(&inheritance_specifiers[0].1)
+        && inheritance_specifiers.iter().skip(1).any(|(_, inherited_name)| {
+            declaration_kinds.get(inherited_name) == Some(&TypeDeclarationKind::Protocol)
+        })
+    {
+        Some(0)
+    } else {
+        None
+    };
+    let class_parent_index = resolved_class_parent.or(inferred_external_class_parent);
+
+    for (index, (child, inherited_name)) in inheritance_specifiers.into_iter().enumerate() {
+        let target_id = make_id(file, module_path, &inherited_name);
+        let edge_kind = match owner_kind {
+            "class_declaration" if class_parent_index == Some(index) => EdgeKind::Inherits,
+            "class_declaration" => EdgeKind::Implements,
+            "protocol_declaration" => EdgeKind::Inherits,
+            _ => EdgeKind::Implements,
+        };
+
+        result.edges.push(Edge {
+            source: type_id.to_string(),
+            target: target_id,
+            kind: edge_kind,
+            confidence: 0.9,
+            direction: None,
+            operation: None,
+            condition: None,
+            async_boundary: None,
+            provenance: node_edge_provenance(file, child, type_id),
+        });
     }
 }
 
@@ -3041,8 +3161,7 @@ pub fn source_contains_image_asset_markers(source: &[u8]) -> bool {
     fn bytes_contains(haystack: &[u8], needle: &[u8]) -> bool {
         haystack.windows(needle.len()).any(|w| w == needle)
     }
-    bytes_contains(source, b"Image(")
-        || bytes_contains(source, b"UIImage(")
+    bytes_contains(source, b"Image(") || bytes_contains(source, b"UIImage(")
 }
 
 pub fn enrich_asset_references_with_tree(
@@ -3285,6 +3404,8 @@ fn find_enclosing_node_index(result: &ExtractionResult, line: usize) -> Option<u
     best.map(|(idx, _)| idx)
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 pub fn enrich_localization_metadata(
     source: &[u8],
     file_path: &Path,
@@ -3300,7 +3421,6 @@ pub fn enrich_localization_metadata_with_tree(
     tree: &Tree,
     result: &mut ExtractionResult,
 ) -> anyhow::Result<()> {
-
     let candidate_owner_names = candidate_owner_names(result);
     let file_str = file_path.to_string_lossy().to_string();
 
@@ -3350,7 +3470,6 @@ pub fn enrich_swiftui_structure_with_tree(
     tree: &Tree,
     result: &mut ExtractionResult,
 ) -> anyhow::Result<()> {
-
     let mut declaration_nodes = Vec::new();
     collect_swiftui_declaration_nodes(tree.root_node(), source, &mut declaration_nodes);
 
@@ -3568,7 +3687,12 @@ mod tests {
 
     #[test]
     fn extracts_protocol_conformance() {
-        let result = extract("public class AppDelegate: Configurable { }");
+        let result = extract(
+            r#"
+            public protocol Configurable {}
+            public class AppDelegate: Configurable { }
+            "#,
+        );
         let app = find_node(&result, "AppDelegate");
         assert!(has_edge(
             &result,

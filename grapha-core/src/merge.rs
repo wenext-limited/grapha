@@ -194,7 +194,8 @@ pub fn merge(results: Vec<ExtractionResult>) -> Graph {
                     let same_file: Vec<&&NameEntry> = siblings
                         .iter()
                         .filter(|c| {
-                            id_to_info.get(c.id.as_str())
+                            id_to_info
+                                .get(c.id.as_str())
                                 .is_some_and(|(_, f)| *f == source_file)
                         })
                         .collect();
@@ -216,15 +217,13 @@ pub fn merge(results: Vec<ExtractionResult>) -> Graph {
                 let sibling_candidates: Vec<&NameEntry> = candidates
                     .iter()
                     .filter(|c| {
-                        candidate_to_owner_names
-                            .get(&c.id)
-                            .is_some_and(|owners| {
-                                owners.iter().any(|owner| {
-                                    source_owners.iter().any(|so| {
-                                        id_to_name.get(so.as_str()).is_some_and(|n| *n == owner)
-                                    })
+                        candidate_to_owner_names.get(&c.id).is_some_and(|owners| {
+                            owners.iter().any(|owner| {
+                                source_owners.iter().any(|so| {
+                                    id_to_name.get(so.as_str()).is_some_and(|n| *n == owner)
                                 })
                             })
+                        })
                     })
                     .collect();
                 if sibling_candidates.len() == 1 {

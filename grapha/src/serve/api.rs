@@ -90,12 +90,8 @@ pub async fn get_search(
     Query(params): Query<SearchParams>,
 ) -> Json<serde_json::Value> {
     let options = crate::search::SearchOptions::default();
-    let results = crate::search::search_filtered(
-        &state.search_index,
-        &params.q,
-        params.limit,
-        &options,
-    )
-    .unwrap_or_default();
+    let results =
+        crate::search::search_filtered(&state.search_index, &params.q, params.limit, &options)
+            .unwrap_or_default();
     Json(serde_json::json!({ "results": results, "total": results.len() }))
 }

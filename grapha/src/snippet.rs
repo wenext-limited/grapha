@@ -27,7 +27,10 @@ impl<'a> LineIndex<'a> {
                 line_starts.push(i + 1);
             }
         }
-        Self { source, line_starts }
+        Self {
+            source,
+            line_starts,
+        }
     }
 
     pub fn extract_snippet(&self, span: &Span, max_len: usize) -> Option<String> {
@@ -58,10 +61,45 @@ impl<'a> LineIndex<'a> {
         }
 
         // Truncate at a clean line boundary within max_len
-        let truncated = &slice[..max_len];
+        let mut truncate_at = max_len;
+        while !slice.is_char_boundary(truncate_at) {
+            truncate_at -= 1;
+        }
+
+        let truncated = &slice[..truncate_at];
         match truncated.rfind('\n') {
             Some(pos) if pos > 0 => Some(truncated[..pos].to_string()),
             _ => Some(truncated.to_string()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::LineIndex;
+    use grapha_core::graph::Span;
+
+    #[test]
+    fn extract_snippet_truncates_single_line_at_utf8_boundary() {
+        let source = "abc中def";
+        let index = LineIndex::new(source);
+        let span = Span {
+            start: [0, 0],
+            end: [0, 0],
+        };
+
+        assert_eq!(index.extract_snippet(&span, 4), Some("abc".to_string()));
+    }
+
+    #[test]
+    fn extract_snippet_truncates_multiline_at_newline_before_utf8_cutoff() {
+        let source = "alpha\n中文beta";
+        let index = LineIndex::new(source);
+        let span = Span {
+            start: [0, 0],
+            end: [1, 0],
+        };
+
+        assert_eq!(index.extract_snippet(&span, 8), Some("alpha".to_string()));
     }
 }

@@ -325,7 +325,11 @@ fn builtin_registry() -> anyhow::Result<grapha_core::LanguageRegistry> {
 }
 
 /// Run the extraction pipeline on a path, returning a merged graph.
-fn run_pipeline(path: &Path, verbose: bool, timing: bool) -> anyhow::Result<grapha_core::graph::Graph> {
+fn run_pipeline(
+    path: &Path,
+    verbose: bool,
+    timing: bool,
+) -> anyhow::Result<grapha_core::graph::Graph> {
     let t = Instant::now();
     let registry = builtin_registry()?;
     let project_context = grapha_core::project_context(path);
@@ -396,7 +400,7 @@ fn run_pipeline(path: &Path, verbose: bool, timing: bool) -> anyhow::Result<grap
             format!("discovered {} files", all_files.len())
         };
         progress::done(&msg, t);
-        if let Some(store) = grapha_swift::index_store_path() {
+        if let Some(store) = grapha_swift::index_store_path(&project_context.project_root) {
             progress::done(&format!("index store: {}", store.display()), t);
         }
     }
@@ -459,12 +463,17 @@ fn run_pipeline(path: &Path, verbose: bool, timing: bool) -> anyhow::Result<grap
             match extraction_result {
                 Ok(mut result) => {
                     let t2 = Instant::now();
-                    if result.nodes.iter().any(|n| snippet::should_extract_snippet(n.kind)) {
+                    if result
+                        .nodes
+                        .iter()
+                        .any(|n| snippet::should_extract_snippet(n.kind))
+                    {
                         // Avoid allocation: try zero-copy first, fall back to lossy
-                        let source_str: std::borrow::Cow<'_, str> = match std::str::from_utf8(&source) {
-                            Ok(s) => std::borrow::Cow::Borrowed(s),
-                            Err(_) => String::from_utf8_lossy(&source),
-                        };
+                        let source_str: std::borrow::Cow<'_, str> =
+                            match std::str::from_utf8(&source) {
+                                Ok(s) => std::borrow::Cow::Borrowed(s),
+                                Err(_) => String::from_utf8_lossy(&source),
+                            };
                         let line_idx = snippet::LineIndex::new(&source_str);
                         for node in &mut result.nodes {
                             if snippet::should_extract_snippet(node.kind) {
@@ -498,13 +507,27 @@ fn run_pipeline(path: &Path, verbose: bool, timing: bool) -> anyhow::Result<grap
         let read_ms = t_read_ns.load(Ordering::Relaxed) as f64 / 1_000_000.0;
         let extract_ms = t_extract_ns.load(Ordering::Relaxed) as f64 / 1_000_000.0;
         let snippet_ms = t_snippet_ns.load(Ordering::Relaxed) as f64 / 1_000_000.0;
-        let is_ms = grapha_swift::TIMING_INDEXSTORE_NS.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1_000_000.0;
-        let ts_parse_ms = grapha_swift::TIMING_TS_PARSE_NS.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1_000_000.0;
-        let doc_ms = grapha_swift::TIMING_TS_DOC_NS.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1_000_000.0;
-        let swiftui_ms = grapha_swift::TIMING_TS_SWIFTUI_NS.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1_000_000.0;
-        let l10n_ms = grapha_swift::TIMING_TS_L10N_NS.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1_000_000.0;
-        let ss_ms = grapha_swift::TIMING_SWIFTSYNTAX_NS.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1_000_000.0;
-        let ts_fb_ms = grapha_swift::TIMING_TS_FALLBACK_NS.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1_000_000.0;
+        let is_ms = grapha_swift::TIMING_INDEXSTORE_NS.load(std::sync::atomic::Ordering::Relaxed)
+            as f64
+            / 1_000_000.0;
+        let ts_parse_ms = grapha_swift::TIMING_TS_PARSE_NS
+            .load(std::sync::atomic::Ordering::Relaxed) as f64
+            / 1_000_000.0;
+        let doc_ms = grapha_swift::TIMING_TS_DOC_NS.load(std::sync::atomic::Ordering::Relaxed)
+            as f64
+            / 1_000_000.0;
+        let swiftui_ms = grapha_swift::TIMING_TS_SWIFTUI_NS
+            .load(std::sync::atomic::Ordering::Relaxed) as f64
+            / 1_000_000.0;
+        let l10n_ms = grapha_swift::TIMING_TS_L10N_NS.load(std::sync::atomic::Ordering::Relaxed)
+            as f64
+            / 1_000_000.0;
+        let ss_ms = grapha_swift::TIMING_SWIFTSYNTAX_NS.load(std::sync::atomic::Ordering::Relaxed)
+            as f64
+            / 1_000_000.0;
+        let ts_fb_ms = grapha_swift::TIMING_TS_FALLBACK_NS
+            .load(std::sync::atomic::Ordering::Relaxed) as f64
+            / 1_000_000.0;
         eprintln!(
             "    thread-summed: read {:.0}ms, extract {:.0}ms, snippet {:.0}ms",
             read_ms, extract_ms, snippet_ms
@@ -879,9 +902,7 @@ fn handle_index(
         let localization = localization_handle
             .join()
             .expect("localization thread panicked")?;
-        let assets = assets_handle
-            .join()
-            .expect("assets thread panicked")?;
+        let assets = assets_handle.join().expect("assets thread panicked")?;
         Ok::<_, anyhow::Error>((save, search, localization, assets))
     });
     let (
@@ -1142,7 +1163,10 @@ fn handle_asset_command(command: AssetCommands) -> anyhow::Result<()> {
                         eprintln!("  no usages found for asset '{name}'");
                     } else {
                         for usage in &usages {
-                            println!("  {} ({}) — {}", usage.node_name, usage.file, usage.asset_name);
+                            println!(
+                                "  {} ({}) — {}",
+                                usage.node_name, usage.file, usage.asset_name
+                            );
                         }
                     }
                     Ok(())

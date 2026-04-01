@@ -203,8 +203,7 @@ impl SqliteStore {
         let mut stmt = tx.prepare_cached(&sql)?;
         let empty_provenance = "[]";
         for (edge_id, edge) in edges {
-            let direction_str: Option<&str> =
-                edge.direction.as_ref().map(flow_direction_str);
+            let direction_str: Option<&str> = edge.direction.as_ref().map(flow_direction_str);
             let async_boundary_int: Option<i64> =
                 edge.async_boundary.map(|b| if b { 1 } else { 0 });
             let provenance = if edge.provenance.is_empty() {
