@@ -1,3 +1,5 @@
+content_roots = ["nodus"]
+
 [adapters]
 enabled = ["claude"]
 [dev-dependencies]

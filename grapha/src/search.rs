@@ -3,7 +3,7 @@ use std::path::Path;
 use anyhow::Result;
 use serde::Serialize;
 use tantivy::collector::TopDocs;
-use tantivy::query::{BooleanQuery, FuzzyTermQuery, Occur, QueryParser, TermQuery};
+use tantivy::query::{BooleanQuery, Occur, QueryParser, TermQuery};
 use tantivy::schema::{IndexRecordOption, STORED, STRING, Schema, TEXT, Value};
 use tantivy::{Index, IndexWriter, ReloadPolicy, TantivyDocument, Term, doc};
 
@@ -64,6 +64,7 @@ impl SearchSyncStats {
 struct SearchFields {
     id: tantivy::schema::Field,
     name: tantivy::schema::Field,
+    name_lower: tantivy::schema::Field,
     kind: tantivy::schema::Field,
     file: tantivy::schema::Field,
     module: tantivy::schema::Field,
@@ -75,6 +76,8 @@ fn schema() -> (Schema, SearchFields) {
     let mut schema_builder = Schema::builder();
     let id = schema_builder.add_text_field("id", STRING | STORED);
     let name = schema_builder.add_text_field("name", TEXT | STORED);
+    // Lowercased, non-tokenized name for fuzzy regex matching on CamelCase symbols
+    let name_lower = schema_builder.add_text_field("name_lower", STRING);
     let kind = schema_builder.add_text_field("kind", STRING | STORED);
     let file = schema_builder.add_text_field("file", TEXT | STORED);
     let module = schema_builder.add_text_field("module", STRING | STORED);
@@ -85,6 +88,7 @@ fn schema() -> (Schema, SearchFields) {
         SearchFields {
             id,
             name,
+            name_lower,
             kind,
             file,
             module,
@@ -116,6 +120,7 @@ fn node_document(fields: SearchFields, node: &Node) -> Result<TantivyDocument> {
     Ok(doc!(
         fields.id => node.id.clone(),
         fields.name => node.name.clone(),
+        fields.name_lower => node.name.to_lowercase(),
         fields.kind => kind_str,
         fields.file => node.file.to_string_lossy().to_string(),
         fields.module => node.module.clone().unwrap_or_default(),
@@ -209,6 +214,7 @@ fn resolve_fields(index: &Index) -> Result<SearchFields> {
     Ok(SearchFields {
         id: schema.get_field("id")?,
         name: schema.get_field("name")?,
+        name_lower: schema.get_field("name_lower")?,
         kind: schema.get_field("kind")?,
         file: schema.get_field("file")?,
         module: schema.get_field("module")?,
@@ -220,6 +226,27 @@ fn resolve_fields(index: &Index) -> Result<SearchFields> {
 #[allow(dead_code)] // Public backward-compat wrapper
 pub fn search(index: &Index, query_str: &str, limit: usize) -> Result<Vec<SearchResult>> {
     search_filtered(index, query_str, limit, &SearchOptions::default())
+}
+
+/// Build a regex pattern for fuzzy matching on lowercased symbol names.
+/// Inserts `.*` between characters to match substring with gaps, tolerating
+/// typos, transpositions, and partial names.
+/// "GiftPanle" → ".*g.*i.*f.*t.*p.*a.*n.*l.*e.*"
+fn build_fuzzy_regex(query: &str) -> String {
+    let lower = query.to_lowercase();
+    let mut pattern = String::with_capacity(lower.len() * 4 + 4);
+    pattern.push_str(".*");
+    for ch in lower.chars() {
+        if ch.is_alphanumeric() {
+            // Escape regex metacharacters
+            if "\\^$.|?*+()[]{}".contains(ch) {
+                pattern.push('\\');
+            }
+            pattern.push(ch);
+            pattern.push_str(".*");
+        }
+    }
+    pattern
 }
 
 pub fn search_filtered(
@@ -237,8 +264,12 @@ pub fn search_filtered(
     let fields = resolve_fields(index)?;
 
     let text_query: Box<dyn tantivy::query::Query> = if options.fuzzy {
-        let term = Term::from_field_text(fields.name, query_str);
-        Box::new(FuzzyTermQuery::new(term, 2, true))
+        // Fuzzy search: use regex on the lowercased, non-tokenized name field.
+        // This handles CamelCase symbols correctly — "GiftPanle" matches
+        // "giftpanelviewmodel" via substring, unlike FuzzyTermQuery which
+        // requires the entire token to be within edit distance.
+        let pattern = build_fuzzy_regex(query_str);
+        Box::new(tantivy::query::RegexQuery::from_pattern(&pattern, fields.name_lower)?)
     } else {
         let query_parser = QueryParser::for_index(index, vec![fields.name, fields.file]);
         Box::new(query_parser.parse_query(query_str)?)
