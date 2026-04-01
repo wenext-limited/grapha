@@ -10,6 +10,7 @@ mod query;
 mod render;
 mod search;
 mod serve;
+mod snippet;
 mod store;
 
 use std::path::{Path, PathBuf};
@@ -319,7 +320,16 @@ fn run_pipeline(path: &Path, verbose: bool) -> anyhow::Result<grapha_core::graph
             }
 
             match extraction_result {
-                Ok(result) => Some(result),
+                Ok(mut result) => {
+                    let source_str = String::from_utf8_lossy(&source);
+                    for node in &mut result.nodes {
+                        if snippet::should_extract_snippet(node.kind) {
+                            node.snippet =
+                                snippet::extract_snippet(&source_str, &node.span, 600);
+                        }
+                    }
+                    Some(result)
+                }
                 Err(e) => {
                     skipped.fetch_add(1, Ordering::Relaxed);
                     if verbose && let Some(ref pb) = pb {
