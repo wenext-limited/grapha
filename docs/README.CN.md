@@ -72,29 +72,29 @@ grapha index .
 
 # 带过滤器搜索
 grapha symbol search "ViewModel" --kind struct
-grapha symbol search "send" --kind function --module LamaLudo --context
-grapha symbol search "config" --fuzzy
+grapha symbol search "send" --kind function --module Room --context
+grapha symbol search "RoomPage" --module Room
 
-# 获取符号的 360° 上下文
-grapha symbol context sendMessage --format tree
+# 获取符号的 360° 上下文（调用者、被调用者、读取、实现）
+grapha symbol context RoomPage --format tree
 
-# 影响分析：改了这个函数，什么会受影响？
-grapha symbol impact bootstrapGame --depth 5 --format tree
+# 影响分析：改了这个类，什么会受影响？
+grapha symbol impact GiftPanelViewModel --depth 2 --format tree
 
-# 正向追踪：入口点 → 终端操作
-grapha flow trace bootstrapGame --format tree
+# 正向追踪：入口点 → 终端操作（网络/持久化/缓存）
+grapha flow trace RoomPage --format tree
 
 # 反向追踪：哪些入口点会经过这个符号？
-grapha flow trace handleSendResult --direction reverse --format tree
+grapha flow trace sendGift --direction reverse --format tree
 
 # 语义 effect 图
-grapha flow graph bootstrapGame --format tree
+grapha flow graph GiftPanelViewModel --format tree
 
 # 列出自动检测到的入口点
 grapha flow entries
 
-# 项目导航
-grapha repo map --module LamaLudo
+# 项目导航 — 展示模块、目录、符号数量
+grapha repo map --module Room
 
 # 仓库变更分析
 grapha repo changes
@@ -133,45 +133,44 @@ grapha analyze src/ -o graph.json      # 输出到文件
 ### `grapha symbol search` — 全文搜索
 
 ```bash
-grapha symbol search "ViewModel"                        # 基础 BM25 搜索
-grapha symbol search "send" --kind function             # 按类型过滤
-grapha symbol search "Config" --module FrameUI           # 按模块过滤
-grapha symbol search "view" --role entry_point           # 按角色过滤
-grapha symbol search "VeiwModel" --fuzzy                 # 容错拼写
-grapha symbol search "sendGift" --context                # 内联源码片段 + 依赖
-grapha symbol search "handle" --kind function --limit 5  # 组合使用
+grapha symbol search "ViewModel"                            # 基础 BM25 搜索
+grapha symbol search "send" --kind function                 # 按类型过滤
+grapha symbol search "RoomPage" --module Room               # 按模块过滤
+grapha symbol search "view" --role entry_point              # 按角色过滤
+grapha symbol search "Gift" --kind function --context       # 内联源码片段 + 依赖
+grapha symbol search "handle" --kind function --limit 5     # 组合使用
 ```
 
 ### `grapha symbol context` — 360° 符号视图
 
 ```bash
-grapha symbol context Config                             # 调用者、被调用者、读取、实现
-grapha symbol context bootstrapGame --format tree        # 树形输出
-grapha symbol context sendGift --fields module,signature # 自定义字段
+grapha symbol context RoomPage                              # 调用者、被调用者、读取、实现
+grapha symbol context RoomPage --format tree                # 树形输出
+grapha symbol context GiftPanelViewModel --fields module,signature  # 自定义字段
 ```
 
 ### `grapha symbol impact` — 影响范围分析
 
 ```bash
-grapha symbol impact bootstrapGame                       # 谁依赖这个符号？
-grapha symbol impact bootstrapGame --depth 5             # 更深层遍历
-grapha symbol impact bootstrapGame --format tree
+grapha symbol impact GiftPanelViewModel                     # 谁依赖这个符号？
+grapha symbol impact GiftPanelViewModel --depth 3           # 更深层遍历
+grapha symbol impact GiftPanelViewModel --format tree
 ```
 
 ### `grapha flow trace` — 正向/反向数据流追踪
 
 ```bash
-grapha flow trace bootstrapGame                          # 入口点 → 终端操作
-grapha flow trace sendMessage --depth 10
-grapha flow trace handleSendResult --direction reverse   # 哪些入口点会经过这里？
-grapha flow trace bootstrapGame --format tree
+grapha flow trace RoomPage                                  # 入口点 → 终端操作
+grapha flow trace sendGift --depth 10
+grapha flow trace sendGift --direction reverse              # 哪些入口点会经过这里？
+grapha flow trace RoomPage --format tree
 ```
 
 ### `grapha flow graph` — 语义 effect 图
 
 ```bash
-grapha flow graph bootstrapGame
-grapha flow graph sendMessage --depth 10 --format tree
+grapha flow graph GiftPanelViewModel
+grapha flow graph GiftPanelViewModel --depth 10 --format tree
 ```
 
 ### `grapha flow entries` — 列出入口点
@@ -185,7 +184,7 @@ grapha flow entries --format tree
 
 ```bash
 grapha repo map                        # 完整项目
-grapha repo map --module FrameUI       # 单个模块
+grapha repo map --module Room          # 单个模块
 ```
 
 ### `grapha repo changes` — Git 变更检测

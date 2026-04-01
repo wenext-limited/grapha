@@ -72,29 +72,29 @@ grapha index .
 
 # Search with filters
 grapha symbol search "ViewModel" --kind struct
-grapha symbol search "send" --kind function --module LamaLudo --context
-grapha symbol search "config" --fuzzy
+grapha symbol search "send" --kind function --module Room --context
+grapha symbol search "GiftPanel" --fuzzy
 
-# 360° context for a symbol
-grapha symbol context sendMessage --format tree
+# 360° context for a symbol (callers, callees, reads, implements)
+grapha symbol context RoomPage --format tree
 
 # Impact analysis: what breaks if this changes?
-grapha symbol impact bootstrapGame --depth 5 --format tree
+grapha symbol impact GiftPanelViewModel --depth 2 --format tree
 
-# Forward trace: entry point → terminal operations
-grapha flow trace bootstrapGame --format tree
+# Forward trace: entry point → terminal operations (network, persistence, cache)
+grapha flow trace RoomPage --format tree
 
 # Reverse: which entry points reach this symbol?
-grapha flow trace handleSendResult --direction reverse --format tree
+grapha flow trace sendGift --direction reverse --format tree
 
 # Derived semantic effect graph
-grapha flow graph bootstrapGame --format tree
+grapha flow graph GiftPanelViewModel --format tree
 
 # List auto-detected entry points
 grapha flow entries
 
-# Project orientation
-grapha repo map --module LamaLudo
+# Project orientation — show modules, directories, symbol counts
+grapha repo map --module Room
 
 # Change detection
 grapha repo changes
@@ -133,45 +133,45 @@ grapha analyze src/ -o graph.json      # Write to file
 ### `grapha symbol search` — Full-text search
 
 ```bash
-grapha symbol search "ViewModel"                        # Basic BM25 search
-grapha symbol search "send" --kind function             # Filter by kind
-grapha symbol search "Config" --module FrameUI           # Filter by module
-grapha symbol search "view" --role entry_point           # Filter by role
-grapha symbol search "VeiwModel" --fuzzy                 # Typo-tolerant
-grapha symbol search "sendGift" --context                # Inline snippets + deps
-grapha symbol search "handle" --kind function --limit 5  # Combined
+grapha symbol search "ViewModel"                            # Basic BM25 search
+grapha symbol search "send" --kind function                 # Filter by kind
+grapha symbol search "RoomPage" --module Room               # Filter by module
+grapha symbol search "view" --role entry_point              # Filter by role
+grapha symbol search "GiftPanel" --fuzzy                    # Typo-tolerant
+grapha symbol search "Gift" --kind function --context       # Inline snippets + deps
+grapha symbol search "handle" --kind function --limit 5     # Combined
 ```
 
 ### `grapha symbol context` — 360° symbol view
 
 ```bash
-grapha symbol context Config                             # Callers, callees, reads, implements
-grapha symbol context bootstrapGame --format tree        # Tree output
-grapha symbol context sendGift --fields module,signature # Custom fields
+grapha symbol context RoomPage                              # Callers, callees, reads, implements
+grapha symbol context RoomPage --format tree                # Tree output
+grapha symbol context GiftPanelViewModel --fields module,signature  # Custom fields
 ```
 
 ### `grapha symbol impact` — Blast radius
 
 ```bash
-grapha symbol impact bootstrapGame                       # Who depends on this?
-grapha symbol impact bootstrapGame --depth 5             # Deeper traversal
-grapha symbol impact bootstrapGame --format tree
+grapha symbol impact GiftPanelViewModel                     # Who depends on this?
+grapha symbol impact GiftPanelViewModel --depth 3           # Deeper traversal
+grapha symbol impact GiftPanelViewModel --format tree
 ```
 
 ### `grapha flow trace` — Forward/reverse dataflow
 
 ```bash
-grapha flow trace bootstrapGame                          # Entry → terminals
-grapha flow trace sendMessage --depth 10
-grapha flow trace handleSendResult --direction reverse   # Which entries reach this?
-grapha flow trace bootstrapGame --format tree
+grapha flow trace RoomPage                                  # Entry → terminals
+grapha flow trace sendGift --depth 10
+grapha flow trace sendGift --direction reverse              # Which entries reach this?
+grapha flow trace RoomPage --format tree
 ```
 
 ### `grapha flow graph` — Derived semantic effect graph
 
 ```bash
-grapha flow graph bootstrapGame
-grapha flow graph sendMessage --depth 10 --format tree
+grapha flow graph GiftPanelViewModel
+grapha flow graph GiftPanelViewModel --depth 10 --format tree
 ```
 
 ### `grapha flow entries` — List entry points
@@ -185,7 +185,7 @@ grapha flow entries --format tree
 
 ```bash
 grapha repo map                        # Full project
-grapha repo map --module FrameUI       # Single module
+grapha repo map --module Room          # Single module
 ```
 
 ### `grapha repo changes` — Git change detection
