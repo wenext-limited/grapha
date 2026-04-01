@@ -1,13 +1,22 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use tree_sitter::Parser;
+use tree_sitter::{Parser, Tree};
 
 use grapha_core::graph::{
     Edge, EdgeKind, EdgeProvenance, Node, NodeKind, NodeRole, Span, Visibility,
 };
 
 use grapha_core::{ExtractionResult, LanguageExtractor};
+
+/// Parse Swift source once. Reuse the tree across enrichment passes.
+pub fn parse_swift(source: &[u8]) -> anyhow::Result<Tree> {
+    let mut parser = Parser::new();
+    parser.set_language(&tree_sitter_swift::LANGUAGE.into())?;
+    parser
+        .parse(source, None)
+        .ok_or_else(|| anyhow::anyhow!("tree-sitter failed to parse Swift source"))
+}
 
 pub struct SwiftExtractor;
 
@@ -1056,12 +1065,15 @@ fn extract_swift_signature(node: tree_sitter::Node, source: &[u8]) -> Option<Str
 /// Index store lines are **1-based**; tree-sitter rows are **0-based**, so we
 /// compare with `row + 1`.
 pub fn enrich_doc_comments(source: &[u8], result: &mut ExtractionResult) -> anyhow::Result<()> {
-    let mut parser = Parser::new();
-    parser.set_language(&tree_sitter_swift::LANGUAGE.into())?;
-    let tree = parser
-        .parse(source, None)
-        .ok_or_else(|| anyhow::anyhow!("tree-sitter failed to parse Swift source"))?;
+    let tree = parse_swift(source)?;
+    enrich_doc_comments_with_tree(source, &tree, result)
+}
 
+pub fn enrich_doc_comments_with_tree(
+    source: &[u8],
+    tree: &Tree,
+    result: &mut ExtractionResult,
+) -> anyhow::Result<()> {
     // Collect (name, 1-based line) → doc_comment from tree-sitter AST.
     let mut doc_map: HashMap<(String, usize), String> = HashMap::new();
     collect_doc_comments(tree.root_node(), source, &mut doc_map);
@@ -3015,11 +3027,16 @@ pub fn enrich_localization_metadata(
     file_path: &Path,
     result: &mut ExtractionResult,
 ) -> anyhow::Result<()> {
-    let mut parser = Parser::new();
-    parser.set_language(&tree_sitter_swift::LANGUAGE.into())?;
-    let tree = parser
-        .parse(source, None)
-        .ok_or_else(|| anyhow::anyhow!("tree-sitter failed to parse Swift source"))?;
+    let tree = parse_swift(source)?;
+    enrich_localization_metadata_with_tree(source, file_path, &tree, result)
+}
+
+pub fn enrich_localization_metadata_with_tree(
+    source: &[u8],
+    file_path: &Path,
+    tree: &Tree,
+    result: &mut ExtractionResult,
+) -> anyhow::Result<()> {
 
     let candidate_owner_names = candidate_owner_names(result);
     let file_str = file_path.to_string_lossy().to_string();
@@ -3059,11 +3076,16 @@ pub fn enrich_swiftui_structure(
     file_path: &Path,
     result: &mut ExtractionResult,
 ) -> anyhow::Result<()> {
-    let mut parser = Parser::new();
-    parser.set_language(&tree_sitter_swift::LANGUAGE.into())?;
-    let tree = parser
-        .parse(source, None)
-        .ok_or_else(|| anyhow::anyhow!("tree-sitter failed to parse Swift source"))?;
+    let tree = parse_swift(source)?;
+    enrich_swiftui_structure_with_tree(source, file_path, &tree, result)
+}
+
+pub fn enrich_swiftui_structure_with_tree(
+    source: &[u8],
+    file_path: &Path,
+    tree: &Tree,
+    result: &mut ExtractionResult,
+) -> anyhow::Result<()> {
 
     let mut declaration_nodes = Vec::new();
     collect_swiftui_declaration_nodes(tree.root_node(), source, &mut declaration_nodes);

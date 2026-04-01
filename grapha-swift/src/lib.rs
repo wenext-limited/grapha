@@ -253,20 +253,35 @@ pub fn extract_swift(
                 .map(|cwd| cwd.join(file_path))
                 .unwrap_or_else(|_| file_path.to_path_buf())
         };
-        let canonical_file = std::fs::canonicalize(&abs_file).unwrap_or(abs_file);
+        // Use abs_file directly — canonicalize is expensive (syscall per file)
+        // and only matters if there are symlinks, which is rare for source files.
+        let canonical_file = abs_file;
         if let Some(mut result) = indexstore::extract_from_indexstore(&canonical_file, store_path) {
             // Index store doesn't provide doc comments — enrich via tree-sitter.
-            let _ = treesitter::enrich_doc_comments(source, &mut result);
-            let _ = treesitter::enrich_swiftui_structure(source, file_path, &mut result);
-            let _ = treesitter::enrich_localization_metadata(source, file_path, &mut result);
+            // Parse once, share tree across all enrichment passes.
+            if let Ok(tree) = treesitter::parse_swift(source) {
+                let _ = treesitter::enrich_doc_comments_with_tree(source, &tree, &mut result);
+                let _ = treesitter::enrich_swiftui_structure_with_tree(
+                    source, file_path, &tree, &mut result,
+                );
+                let _ = treesitter::enrich_localization_metadata_with_tree(
+                    source, file_path, &tree, &mut result,
+                );
+            }
             return Ok(result);
         }
     }
 
     if let Some(mut result) = swiftsyntax::extract_with_swiftsyntax(source, file_path) {
-        let _ = treesitter::enrich_doc_comments(source, &mut result);
-        let _ = treesitter::enrich_swiftui_structure(source, file_path, &mut result);
-        let _ = treesitter::enrich_localization_metadata(source, file_path, &mut result);
+        if let Ok(tree) = treesitter::parse_swift(source) {
+            let _ = treesitter::enrich_doc_comments_with_tree(source, &tree, &mut result);
+            let _ = treesitter::enrich_swiftui_structure_with_tree(
+                source, file_path, &tree, &mut result,
+            );
+            let _ = treesitter::enrich_localization_metadata_with_tree(
+                source, file_path, &tree, &mut result,
+            );
+        }
         return Ok(result);
     }
 
