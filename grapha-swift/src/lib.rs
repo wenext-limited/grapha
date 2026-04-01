@@ -233,16 +233,26 @@ fn stamp_swift_module(result: ExtractionResult, module_name: Option<&str>) -> Ex
     }
 }
 
+fn bytes_contains(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack.windows(needle.len()).any(|w| w == needle)
+}
+
 /// Fast byte-level check for SwiftUI markers to skip expensive enrichment.
 fn source_contains_swiftui_markers(source: &[u8]) -> bool {
-    fn contains(haystack: &[u8], needle: &[u8]) -> bool {
-        haystack.windows(needle.len()).any(|w| w == needle)
-    }
-    contains(source, b"SwiftUI")
-        || contains(source, b": View")
-        || contains(source, b": App ")
-        || contains(source, b": App{")
-        || contains(source, b"@ViewBuilder")
+    bytes_contains(source, b"SwiftUI")
+        || bytes_contains(source, b": View")
+        || bytes_contains(source, b": App ")
+        || bytes_contains(source, b": App{")
+        || bytes_contains(source, b"@ViewBuilder")
+}
+
+/// Fast byte-level check for localization markers to skip l10n enrichment.
+fn source_contains_l10n_markers(source: &[u8]) -> bool {
+    bytes_contains(source, b"L10n")
+        || bytes_contains(source, b"NSLocalizedString")
+        || bytes_contains(source, b"LocalizedStringKey")
+        || bytes_contains(source, b"Text(\"")
+        || bytes_contains(source, b"Localizable")
 }
 
 /// Extract Swift source code with waterfall strategy:
@@ -288,31 +298,40 @@ pub fn extract_swift(
         if let Some(mut result) = is_result {
             // Index store doesn't provide doc comments — enrich via tree-sitter.
             // Parse once, share tree across all enrichment passes.
-            let t_parse = Instant::now();
-            let tree_result = treesitter::parse_swift(source);
-            TIMING_TS_PARSE_NS.fetch_add(t_parse.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            // Check which enrichment passes are needed before parsing
+            let has_swiftui = source_contains_swiftui_markers(source);
+            let has_l10n = source_contains_l10n_markers(source);
+            let needs_doc = result.nodes.iter().any(|n| n.doc_comment.is_none());
+            let needs_parse = needs_doc || has_swiftui || has_l10n;
 
-            if let Ok(tree) = tree_result {
-                let t_doc = Instant::now();
-                let _ = treesitter::enrich_doc_comments_with_tree(source, &tree, &mut result);
-                TIMING_TS_DOC_NS.fetch_add(t_doc.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            if needs_parse {
+                let t_parse = Instant::now();
+                let tree_result = treesitter::parse_swift(source);
+                TIMING_TS_PARSE_NS.fetch_add(t_parse.elapsed().as_nanos() as u64, Ordering::Relaxed);
 
-                // Skip expensive SwiftUI/l10n enrichment for files that clearly aren't SwiftUI
-                let has_swiftui = source_contains_swiftui_markers(source);
+                if let Ok(tree) = tree_result {
+                    if needs_doc {
+                        let t_doc = Instant::now();
+                        let _ = treesitter::enrich_doc_comments_with_tree(source, &tree, &mut result);
+                        TIMING_TS_DOC_NS.fetch_add(t_doc.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                    }
 
-                if has_swiftui {
-                    let t_swiftui = Instant::now();
-                    let _ = treesitter::enrich_swiftui_structure_with_tree(
-                        source, file_path, &tree, &mut result,
-                    );
-                    TIMING_TS_SWIFTUI_NS.fetch_add(t_swiftui.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                    if has_swiftui {
+                        let t_swiftui = Instant::now();
+                        let _ = treesitter::enrich_swiftui_structure_with_tree(
+                            source, file_path, &tree, &mut result,
+                        );
+                        TIMING_TS_SWIFTUI_NS.fetch_add(t_swiftui.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                    }
+
+                    if has_l10n {
+                        let t_l10n = Instant::now();
+                        let _ = treesitter::enrich_localization_metadata_with_tree(
+                            source, file_path, &tree, &mut result,
+                        );
+                        TIMING_TS_L10N_NS.fetch_add(t_l10n.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                    }
                 }
-
-                let t_l10n = Instant::now();
-                let _ = treesitter::enrich_localization_metadata_with_tree(
-                    source, file_path, &tree, &mut result,
-                );
-                TIMING_TS_L10N_NS.fetch_add(t_l10n.elapsed().as_nanos() as u64, Ordering::Relaxed);
             }
             return Ok(result);
         }
