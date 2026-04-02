@@ -47,7 +47,7 @@ jobs:
 
   swift:
     name: Swift Bridge
-    runs-on: macos-15
+    runs-on: macos-latest
     timeout-minutes: 30
     env:
       GRAPHA_SWIFT_BRIDGE_MODE: required
