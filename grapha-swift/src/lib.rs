@@ -328,10 +328,13 @@ fn bytes_contains(haystack: &[u8], needle: &[u8]) -> bool {
 
 /// Fast byte-level check for SwiftUI markers to skip expensive enrichment.
 fn source_contains_swiftui_markers(source: &[u8]) -> bool {
-    bytes_contains(source, b"SwiftUI")
-        || bytes_contains(source, b": View")
+    bytes_contains(source, b": View")
         || bytes_contains(source, b": App ")
         || bytes_contains(source, b": App{")
+        || bytes_contains(source, b"some View")
+        || bytes_contains(source, b"any View")
+        || bytes_contains(source, b"some SwiftUI.View")
+        || bytes_contains(source, b"any SwiftUI.View")
         || bytes_contains(source, b"@ViewBuilder")
 }
 
@@ -746,5 +749,60 @@ mod discovery_cache_tests {
         assert!(project_b_attempts > 0);
         assert_eq!(index_store_path_in(&cache, project_a), None);
         assert_eq!(index_store_path_in(&cache, project_b), Some(expected));
+    }
+}
+
+#[cfg(test)]
+mod marker_tests {
+    use super::{
+        source_contains_asset_markers, source_contains_l10n_markers,
+        source_contains_swiftui_markers,
+    };
+
+    #[test]
+    fn swiftui_markers_ignore_plain_imports() {
+        let source = br#"
+        import SwiftUI
+
+        struct Palette {
+            let primary: Color
+        }
+        "#;
+
+        assert!(!source_contains_swiftui_markers(source));
+    }
+
+    #[test]
+    fn swiftui_markers_cover_view_signatures_and_builders() {
+        let direct_view = br#"
+        struct ContentView: View {
+            var body: some View { Text("Hi") }
+        }
+        "#;
+        assert!(source_contains_swiftui_markers(direct_view));
+
+        let builder_helper = br#"
+        @ViewBuilder
+        func content() -> some View {
+            Text("Hi")
+        }
+        "#;
+        assert!(source_contains_swiftui_markers(builder_helper));
+
+        let existential_view = br#"
+        func erasedBody() -> any SwiftUI.View {
+            fatalError()
+        }
+        "#;
+        assert!(source_contains_swiftui_markers(existential_view));
+    }
+
+    #[test]
+    fn localization_and_asset_markers_still_match_common_cases() {
+        assert!(source_contains_l10n_markers(br#"Text("hello")"#));
+        assert!(source_contains_l10n_markers(
+            br#"NSLocalizedString("hello", comment: "")"#
+        ));
+        assert!(source_contains_asset_markers(br#"Image("logo")"#));
     }
 }

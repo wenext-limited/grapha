@@ -559,6 +559,9 @@ fn run_pipeline(
         let l10n_ms = grapha_swift::TIMING_TS_L10N_NS.load(std::sync::atomic::Ordering::Relaxed)
             as f64
             / 1_000_000.0;
+        let asset_ms = grapha_swift::TIMING_TS_ASSET_NS.load(std::sync::atomic::Ordering::Relaxed)
+            as f64
+            / 1_000_000.0;
         let ss_ms = grapha_swift::TIMING_SWIFTSYNTAX_NS.load(std::sync::atomic::Ordering::Relaxed)
             as f64
             / 1_000_000.0;
@@ -570,8 +573,8 @@ fn run_pipeline(
             read_ms, extract_ms, snippet_ms
         );
         eprintln!(
-            "    swift: indexstore {:.0}ms, ts-parse {:.0}ms, doc {:.0}ms, swiftui {:.0}ms, l10n {:.0}ms, swiftsyntax {:.0}ms, ts-fallback {:.0}ms",
-            is_ms, ts_parse_ms, doc_ms, swiftui_ms, l10n_ms, ss_ms, ts_fb_ms
+            "    swift: indexstore {:.0}ms, ts-parse {:.0}ms, doc {:.0}ms, swiftui {:.0}ms, l10n {:.0}ms, asset {:.0}ms, swiftsyntax {:.0}ms, ts-fallback {:.0}ms",
+            is_ms, ts_parse_ms, doc_ms, swiftui_ms, l10n_ms, asset_ms, ss_ms, ts_fb_ms
         );
     }
     if verbose {

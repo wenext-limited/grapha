@@ -1,5 +1,6 @@
-use std::collections::HashMap;
-use std::path::Path;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 
 use tree_sitter::{Parser, Tree};
 
@@ -34,6 +35,235 @@ impl LanguageExtractor for SwiftExtractor {
         walk_node(tree.root_node(), source, &file_str, &[], None, &mut result);
 
         Ok(result)
+    }
+}
+
+#[derive(Clone)]
+struct NodeSnapshot {
+    id: String,
+    kind: NodeKind,
+    name: String,
+    file: PathBuf,
+    span: Span,
+}
+
+impl From<&Node> for NodeSnapshot {
+    fn from(node: &Node) -> Self {
+        Self {
+            id: node.id.clone(),
+            kind: node.kind,
+            name: node.name.clone(),
+            file: node.file.clone(),
+            span: node.span.clone(),
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct EdgeDedupKey {
+    source: String,
+    target: String,
+    kind: EdgeKind,
+    operation: Option<String>,
+}
+
+impl From<&Edge> for EdgeDedupKey {
+    fn from(edge: &Edge) -> Self {
+        Self {
+            source: edge.source.clone(),
+            target: edge.target.clone(),
+            kind: edge.kind,
+            operation: edge.operation.clone(),
+        }
+    }
+}
+
+struct EnrichmentContext<'a> {
+    result: &'a mut ExtractionResult,
+    node_snapshots: Vec<NodeSnapshot>,
+    nodes_by_kind_name: HashMap<(NodeKind, String), Vec<usize>>,
+    view_candidates_by_name: HashMap<String, Vec<usize>>,
+    node_index_by_id: HashMap<String, usize>,
+    candidate_owner_names: HashMap<String, Vec<String>>,
+    existing_node_ids: HashSet<String>,
+    existing_edge_keys: HashSet<EdgeDedupKey>,
+}
+
+impl<'a> EnrichmentContext<'a> {
+    fn new(result: &'a mut ExtractionResult) -> Self {
+        let candidate_owner_names = candidate_owner_names(result);
+        let existing_edge_keys = result.edges.iter().map(EdgeDedupKey::from).collect();
+        let existing_node_ids = result.nodes.iter().map(|node| node.id.clone()).collect();
+        let snapshots: Vec<(usize, NodeSnapshot)> = result
+            .nodes
+            .iter()
+            .enumerate()
+            .map(|(idx, node)| (idx, NodeSnapshot::from(node)))
+            .collect();
+        let mut context = Self {
+            result,
+            node_snapshots: Vec::with_capacity(snapshots.len()),
+            nodes_by_kind_name: HashMap::new(),
+            view_candidates_by_name: HashMap::new(),
+            node_index_by_id: HashMap::new(),
+            candidate_owner_names,
+            existing_node_ids,
+            existing_edge_keys,
+        };
+        for (result_index, snapshot) in snapshots {
+            context.track_node(snapshot, result_index);
+        }
+        context
+    }
+
+    fn track_node(&mut self, snapshot: NodeSnapshot, result_index: usize) {
+        let snapshot_index = self.node_snapshots.len();
+        self.node_index_by_id
+            .insert(snapshot.id.clone(), result_index);
+        self.nodes_by_kind_name
+            .entry((snapshot.kind, snapshot.name.clone()))
+            .or_default()
+            .push(snapshot_index);
+        if snapshot.kind == NodeKind::View {
+            self.view_candidates_by_name
+                .entry(snapshot.name.clone())
+                .or_default()
+                .push(snapshot_index);
+        }
+        self.node_snapshots.push(snapshot);
+    }
+
+    fn node_mut(&mut self, node_id: &str) -> Option<&mut Node> {
+        let index = *self.node_index_by_id.get(node_id)?;
+        self.result.nodes.get_mut(index)
+    }
+
+    fn push_node(&mut self, node: Node) -> bool {
+        if !self.existing_node_ids.insert(node.id.clone()) {
+            return false;
+        }
+        let result_index = self.result.nodes.len();
+        let snapshot = NodeSnapshot::from(&node);
+        self.result.nodes.push(node);
+        self.track_node(snapshot, result_index);
+        true
+    }
+
+    fn emit_edge(&mut self, edge: Edge) {
+        let key = EdgeDedupKey::from(&edge);
+        if self.existing_edge_keys.insert(key) {
+            self.result.edges.push(edge);
+        }
+    }
+
+    fn matching_declaration_id(
+        &self,
+        file_path: &Path,
+        decl_node: tree_sitter::Node,
+        source: &[u8],
+    ) -> Option<String> {
+        let decl_line = decl_node.start_position().row;
+        let decl_name = declaration_name(decl_node, source)?;
+        let decl_kind = declaration_kind(decl_node)?;
+        let owner_name = enclosing_owner_type_name(decl_node, source);
+        let key = (decl_kind, decl_name);
+        let candidates = self
+            .nodes_by_kind_name
+            .get(&key)?
+            .iter()
+            .map(|snapshot_index| &self.node_snapshots[*snapshot_index])
+            .filter(|node| file_matches(&node.file, file_path))
+            .collect::<Vec<_>>();
+
+        let line_matches = candidates
+            .iter()
+            .copied()
+            .filter(|node| line_matches(node.span.start[0], decl_line))
+            .collect::<Vec<_>>();
+        if !line_matches.is_empty() {
+            return line_matches
+                .into_iter()
+                .min_by_key(|node| node.span.start[0].abs_diff(decl_line))
+                .map(|node| node.id.clone());
+        }
+
+        if let Some(owner_name) = owner_name {
+            let owner_matches = candidates
+                .iter()
+                .copied()
+                .filter(|node| {
+                    self.candidate_owner_names
+                        .get(&node.id)
+                        .is_some_and(|owners| owners.iter().any(|owner| owner == &owner_name))
+                })
+                .collect::<Vec<_>>();
+            if owner_matches.len() == 1 {
+                return Some(owner_matches[0].id.clone());
+            }
+            if !owner_matches.is_empty() {
+                return owner_matches
+                    .into_iter()
+                    .min_by_key(|node| node.span.start[0].abs_diff(decl_line))
+                    .map(|node| node.id.clone());
+            }
+        }
+
+        if candidates.len() == 1 {
+            return Some(candidates[0].id.clone());
+        }
+
+        candidates
+            .into_iter()
+            .min_by_key(|node| node.span.start[0].abs_diff(decl_line))
+            .map(|node| node.id.clone())
+    }
+
+    fn matching_body_id(&self, file_path: &Path, body_node: tree_sitter::Node) -> Option<String> {
+        let body_line = body_node.start_position().row;
+        self.nodes_by_kind_name
+            .get(&(NodeKind::Property, "body".to_string()))?
+            .iter()
+            .map(|snapshot_index| &self.node_snapshots[*snapshot_index])
+            .filter(|node| {
+                file_matches(&node.file, file_path) && line_matches(node.span.start[0], body_line)
+            })
+            .min_by_key(|node| node.span.start[0].abs_diff(body_line))
+            .map(|node| node.id.clone())
+    }
+
+    fn matching_view_id(
+        &self,
+        file_path: &Path,
+        view_node: tree_sitter::Node,
+        name: &str,
+    ) -> Option<String> {
+        let span = make_span(view_node);
+        let candidates = self.view_candidates_by_name.get(name)?;
+
+        let exact = candidates
+            .iter()
+            .map(|snapshot_index| &self.node_snapshots[*snapshot_index])
+            .find(|node| {
+                file_matches(&node.file, file_path)
+                    && node.span.start == span.start
+                    && node.span.end == span.end
+            });
+        if let Some(node) = exact {
+            return Some(node.id.clone());
+        }
+
+        candidates
+            .iter()
+            .map(|snapshot_index| &self.node_snapshots[*snapshot_index])
+            .filter(|node| {
+                file_matches(&node.file, file_path)
+                    && line_matches(node.span.start[0], span.start[0])
+            })
+            .min_by_key(|node| {
+                node.span.start[0].abs_diff(span.start[0])
+                    + node.span.start[1].abs_diff(span.start[1])
+            })
+            .map(|node| node.id.clone())
     }
 }
 
@@ -1618,25 +1848,6 @@ fn extract_calls(
     }
 }
 
-fn emit_unique_edge(result: &mut ExtractionResult, edge: Edge) {
-    if result.edges.iter().any(|existing| {
-        existing.source == edge.source
-            && existing.target == edge.target
-            && existing.kind == edge.kind
-            && existing.operation == edge.operation
-    }) {
-        return;
-    }
-    result.edges.push(edge);
-}
-
-fn push_unique_node(result: &mut ExtractionResult, node: Node) {
-    if result.nodes.iter().any(|existing| existing.id == node.id) {
-        return;
-    }
-    result.nodes.push(node);
-}
-
 fn node_by_id_mut<'a>(result: &'a mut ExtractionResult, node_id: &str) -> Option<&'a mut Node> {
     result.nodes.iter_mut().find(|node| node.id == node_id)
 }
@@ -1672,7 +1883,7 @@ fn make_swiftui_synthetic_id(
 }
 
 fn emit_swiftui_node(
-    result: &mut ExtractionResult,
+    context: &mut EnrichmentContext<'_>,
     owner_id: &str,
     parent_id: &str,
     name: &str,
@@ -1686,37 +1897,31 @@ fn emit_swiftui_node(
         _ => "synthetic",
     };
     let id = make_swiftui_synthetic_id(owner_id, prefix, name, node);
-    push_unique_node(
-        result,
-        Node {
-            id: id.clone(),
-            kind,
-            name: name.to_string(),
-            file: file.into(),
-            span: make_span(node),
-            visibility: Visibility::Private,
-            metadata: HashMap::new(),
-            role: None,
-            signature: None,
-            doc_comment: None,
-            module: None,
-            snippet: None,
-        },
-    );
-    emit_unique_edge(
-        result,
-        Edge {
-            source: parent_id.to_string(),
-            target: id.clone(),
-            kind: EdgeKind::Contains,
-            confidence: 1.0,
-            direction: None,
-            operation: None,
-            condition: None,
-            async_boundary: None,
-            provenance: node_edge_provenance(file, node, parent_id),
-        },
-    );
+    context.push_node(Node {
+        id: id.clone(),
+        kind,
+        name: name.to_string(),
+        file: file.into(),
+        span: make_span(node),
+        visibility: Visibility::Private,
+        metadata: HashMap::new(),
+        role: None,
+        signature: None,
+        doc_comment: None,
+        module: None,
+        snippet: None,
+    });
+    context.emit_edge(Edge {
+        source: parent_id.to_string(),
+        target: id.clone(),
+        kind: EdgeKind::Contains,
+        confidence: 1.0,
+        direction: None,
+        operation: None,
+        condition: None,
+        async_boundary: None,
+        provenance: node_edge_provenance(file, node, parent_id),
+    });
     id
 }
 
@@ -1790,7 +1995,7 @@ fn emit_dependency_read(
     file: &str,
     module_path: &[String],
     owner_id: &str,
-    result: &mut ExtractionResult,
+    context: &mut EnrichmentContext<'_>,
 ) {
     let owner_name = enclosing_owner_type_name(node, source);
     let Some(name) = dependency_read_name(node, source, owner_name.as_deref()) else {
@@ -1812,20 +2017,17 @@ fn emit_dependency_read(
         return;
     }
 
-    emit_unique_edge(
-        result,
-        Edge {
-            source: owner_id.to_string(),
-            target: target_id,
-            kind: EdgeKind::Reads,
-            confidence: 0.85,
-            direction: None,
-            operation: owner_name,
-            condition: find_enclosing_swift_condition(node, source),
-            async_boundary: None,
-            provenance: node_edge_provenance(file, node, owner_id),
-        },
-    );
+    context.emit_edge(Edge {
+        source: owner_id.to_string(),
+        target: target_id,
+        kind: EdgeKind::Reads,
+        confidence: 0.85,
+        direction: None,
+        operation: owner_name,
+        condition: find_enclosing_swift_condition(node, source),
+        async_boundary: None,
+        provenance: node_edge_provenance(file, node, owner_id),
+    });
 }
 
 fn extract_property_dependency_reads(
@@ -1834,9 +2036,9 @@ fn extract_property_dependency_reads(
     file: &str,
     module_path: &[String],
     owner_id: &str,
-    result: &mut ExtractionResult,
+    context: &mut EnrichmentContext<'_>,
 ) {
-    emit_dependency_read(node, source, file, module_path, owner_id, result);
+    emit_dependency_read(node, source, file, module_path, owner_id, context);
 
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
@@ -1851,7 +2053,7 @@ fn extract_property_dependency_reads(
         ) {
             continue;
         }
-        extract_property_dependency_reads(child, source, file, module_path, owner_id, result);
+        extract_property_dependency_reads(child, source, file, module_path, owner_id, context);
     }
 }
 
@@ -2000,11 +2202,11 @@ fn emit_swiftui_view_reference(
     module_path: &[String],
     owner_id: &str,
     parent_id: &str,
-    result: &mut ExtractionResult,
+    context: &mut EnrichmentContext<'_>,
 ) -> Option<String> {
     let name = view_reference_name(node, source)?;
     let view_id = emit_swiftui_node(
-        result,
+        context,
         owner_id,
         parent_id,
         &name,
@@ -2016,20 +2218,17 @@ fn emit_swiftui_view_reference(
         let target_id = same_owner_member_id(owner_id, &name)
             .unwrap_or_else(|| make_id(file, module_path, &name));
         let owner_hint = enclosing_owner_type_name(node, source);
-        emit_unique_edge(
-            result,
-            Edge {
-                source: view_id.clone(),
-                target: target_id,
-                kind: EdgeKind::TypeRef,
-                confidence: 0.85,
-                direction: None,
-                operation: owner_hint,
-                condition: None,
-                async_boundary: None,
-                provenance: node_edge_provenance(file, node, &view_id),
-            },
-        );
+        context.emit_edge(Edge {
+            source: view_id.clone(),
+            target: target_id,
+            kind: EdgeKind::TypeRef,
+            confidence: 0.85,
+            direction: None,
+            operation: owner_hint,
+            condition: None,
+            async_boundary: None,
+            provenance: node_edge_provenance(file, node, &view_id),
+        });
     }
     Some(view_id)
 }
@@ -2041,7 +2240,7 @@ fn emit_swiftui_call_reference(
     module_path: &[String],
     owner_id: &str,
     parent_id: &str,
-    result: &mut ExtractionResult,
+    context: &mut EnrichmentContext<'_>,
 ) -> Option<String> {
     let name = swiftui_call_name(node, source)?;
     if uppercase_identifier(&name) {
@@ -2049,7 +2248,7 @@ fn emit_swiftui_call_reference(
     }
 
     let view_id = emit_swiftui_node(
-        result,
+        context,
         owner_id,
         parent_id,
         &name,
@@ -2060,20 +2259,17 @@ fn emit_swiftui_call_reference(
     let target_id =
         same_owner_member_id(owner_id, &name).unwrap_or_else(|| make_id(file, module_path, &name));
     let owner_hint = enclosing_owner_type_name(node, source);
-    emit_unique_edge(
-        result,
-        Edge {
-            source: view_id.clone(),
-            target: target_id,
-            kind: EdgeKind::TypeRef,
-            confidence: 0.85,
-            direction: None,
-            operation: owner_hint,
-            condition: None,
-            async_boundary: None,
-            provenance: node_edge_provenance(file, node, &view_id),
-        },
-    );
+    context.emit_edge(Edge {
+        source: view_id.clone(),
+        target: target_id,
+        kind: EdgeKind::TypeRef,
+        confidence: 0.85,
+        direction: None,
+        operation: owner_hint,
+        condition: None,
+        async_boundary: None,
+        provenance: node_edge_provenance(file, node, &view_id),
+    });
     for lambda in structural_call_suffix_lambda_children(node, source) {
         let _ = extract_swiftui_structure(
             lambda,
@@ -2082,7 +2278,7 @@ fn emit_swiftui_call_reference(
             module_path,
             owner_id,
             &view_id,
-            result,
+            context,
         );
     }
     Some(view_id)
@@ -2183,7 +2379,7 @@ fn recurse_swiftui_named_children(
     module_path: &[String],
     owner_id: &str,
     parent_id: &str,
-    result: &mut ExtractionResult,
+    context: &mut EnrichmentContext<'_>,
 ) -> Vec<String> {
     let mut anchors = Vec::new();
     let mut cursor = node.walk();
@@ -2195,7 +2391,7 @@ fn recurse_swiftui_named_children(
             module_path,
             owner_id,
             parent_id,
-            result,
+            context,
         ));
     }
     anchors
@@ -2207,7 +2403,7 @@ fn extract_swiftui_dependency_reads(
     file: &str,
     module_path: &[String],
     owner_id: &str,
-    result: &mut ExtractionResult,
+    context: &mut EnrichmentContext<'_>,
 ) {
     match node.kind() {
         "call_expression" => {
@@ -2225,7 +2421,7 @@ fn extract_swiftui_dependency_reads(
                                 file,
                                 module_path,
                                 owner_id,
-                                result,
+                                context,
                             );
                         }
                     }
@@ -2238,7 +2434,7 @@ fn extract_swiftui_dependency_reads(
                     file,
                     module_path,
                     owner_id,
-                    result,
+                    context,
                 );
             }
 
@@ -2249,12 +2445,12 @@ fn extract_swiftui_dependency_reads(
                     file,
                     module_path,
                     owner_id,
-                    result,
+                    context,
                 );
             }
         }
         _ => {
-            emit_dependency_read(node, source, file, module_path, owner_id, result);
+            emit_dependency_read(node, source, file, module_path, owner_id, context);
 
             let mut cursor = node.walk();
             for child in node.named_children(&mut cursor) {
@@ -2264,7 +2460,7 @@ fn extract_swiftui_dependency_reads(
                     file,
                     module_path,
                     owner_id,
-                    result,
+                    context,
                 );
             }
         }
@@ -2278,7 +2474,7 @@ fn extract_swiftui_if_structure(
     module_path: &[String],
     owner_id: &str,
     parent_id: &str,
-    result: &mut ExtractionResult,
+    context: &mut EnrichmentContext<'_>,
 ) -> Vec<String> {
     let condition = node
         .child_by_field_name("condition")
@@ -2297,7 +2493,7 @@ fn extract_swiftui_if_structure(
     let mut branch_ids = Vec::new();
     if let Some(then_child) = named_children.first().copied() {
         let branch_id = emit_swiftui_node(
-            result,
+            context,
             owner_id,
             parent_id,
             condition.as_deref().unwrap_or("if"),
@@ -2313,13 +2509,13 @@ fn extract_swiftui_if_structure(
             module_path,
             owner_id,
             &branch_id,
-            result,
+            context,
         );
     }
 
     if let Some(else_child) = named_children.get(1).copied() {
         let branch_id = emit_swiftui_node(
-            result,
+            context,
             owner_id,
             parent_id,
             "else",
@@ -2335,7 +2531,7 @@ fn extract_swiftui_if_structure(
             module_path,
             owner_id,
             &branch_id,
-            result,
+            context,
         );
     }
 
@@ -2365,7 +2561,7 @@ fn extract_swiftui_switch_structure(
     module_path: &[String],
     owner_id: &str,
     parent_id: &str,
-    result: &mut ExtractionResult,
+    context: &mut EnrichmentContext<'_>,
 ) -> Vec<String> {
     let label = node
         .child_by_field_name("expr")
@@ -2373,7 +2569,7 @@ fn extract_swiftui_switch_structure(
         .map(|text| format!("switch {}", text.trim()))
         .unwrap_or_else(|| "switch".to_string());
     let switch_id = emit_swiftui_node(
-        result,
+        context,
         owner_id,
         parent_id,
         &label,
@@ -2388,7 +2584,7 @@ fn extract_swiftui_switch_structure(
             continue;
         }
         let case_id = emit_swiftui_node(
-            result,
+            context,
             owner_id,
             &switch_id,
             &switch_entry_label(child, source),
@@ -2406,7 +2602,7 @@ fn extract_swiftui_switch_structure(
                     module_path,
                     owner_id,
                     &case_id,
-                    result,
+                    context,
                 );
             }
         }
@@ -2422,7 +2618,7 @@ fn extract_swiftui_structure(
     module_path: &[String],
     owner_id: &str,
     parent_id: &str,
-    result: &mut ExtractionResult,
+    context: &mut EnrichmentContext<'_>,
 ) -> Vec<String> {
     match node.kind() {
         "statements" | "lambda_literal" | "computed_property" => recurse_swiftui_named_children(
@@ -2432,14 +2628,14 @@ fn extract_swiftui_structure(
             module_path,
             owner_id,
             parent_id,
-            result,
+            context,
         ),
         "call_expression" => {
             if let Some(name) = swiftui_call_name(node, source)
                 && uppercase_identifier(&name)
             {
                 let view_id = emit_swiftui_node(
-                    result,
+                    context,
                     owner_id,
                     parent_id,
                     &name,
@@ -2448,20 +2644,17 @@ fn extract_swiftui_structure(
                     node,
                 );
                 if !is_builtin_swiftui_view(&name) {
-                    emit_unique_edge(
-                        result,
-                        Edge {
-                            source: view_id.clone(),
-                            target: make_id(file, module_path, &name),
-                            kind: EdgeKind::TypeRef,
-                            confidence: 0.85,
-                            direction: None,
-                            operation: None,
-                            condition: None,
-                            async_boundary: None,
-                            provenance: node_edge_provenance(file, node, &view_id),
-                        },
-                    );
+                    context.emit_edge(Edge {
+                        source: view_id.clone(),
+                        target: make_id(file, module_path, &name),
+                        kind: EdgeKind::TypeRef,
+                        confidence: 0.85,
+                        direction: None,
+                        operation: None,
+                        condition: None,
+                        async_boundary: None,
+                        provenance: node_edge_provenance(file, node, &view_id),
+                    });
                 }
                 for lambda in structural_call_suffix_lambda_children(node, source) {
                     let _ = extract_swiftui_structure(
@@ -2471,7 +2664,7 @@ fn extract_swiftui_structure(
                         module_path,
                         owner_id,
                         &view_id,
-                        result,
+                        context,
                     );
                 }
                 vec![view_id]
@@ -2485,7 +2678,7 @@ fn extract_swiftui_structure(
                     module_path,
                     owner_id,
                     parent_id,
-                    result,
+                    context,
                 );
                 if is_view_builder_modifier(&modifier_name) {
                     let modifier_parents: Vec<String> = if anchors.is_empty() {
@@ -2502,7 +2695,7 @@ fn extract_swiftui_structure(
                                 module_path,
                                 owner_id,
                                 anchor,
-                                result,
+                                context,
                             );
                         }
                     }
@@ -2515,7 +2708,7 @@ fn extract_swiftui_structure(
                 module_path,
                 owner_id,
                 parent_id,
-                result,
+                context,
             ) {
                 vec![view_id]
             } else {
@@ -2526,7 +2719,7 @@ fn extract_swiftui_structure(
                     module_path,
                     owner_id,
                     parent_id,
-                    result,
+                    context,
                 )
             }
         }
@@ -2537,7 +2730,7 @@ fn extract_swiftui_structure(
             module_path,
             owner_id,
             parent_id,
-            result,
+            context,
         ),
         "switch_statement" => extract_swiftui_switch_structure(
             node,
@@ -2546,7 +2739,7 @@ fn extract_swiftui_structure(
             module_path,
             owner_id,
             parent_id,
-            result,
+            context,
         ),
         "simple_identifier" | "navigation_expression" => emit_swiftui_view_reference(
             node,
@@ -2555,7 +2748,7 @@ fn extract_swiftui_structure(
             module_path,
             owner_id,
             parent_id,
-            result,
+            context,
         )
         .into_iter()
         .collect(),
@@ -2566,8 +2759,33 @@ fn extract_swiftui_structure(
             module_path,
             owner_id,
             parent_id,
-            result,
+            context,
         ),
+    }
+}
+
+fn extract_swiftui_declaration_structure_with_context(
+    node: tree_sitter::Node,
+    source: &[u8],
+    file: &str,
+    module_path: &[String],
+    decl_id: &str,
+    context: &mut EnrichmentContext<'_>,
+) {
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if matches!(child.kind(), "computed_property" | "function_body") {
+            extract_swiftui_dependency_reads(child, source, file, module_path, decl_id, context);
+            let _ = extract_swiftui_structure(
+                child,
+                source,
+                file,
+                module_path,
+                decl_id,
+                decl_id,
+                context,
+            );
+        }
     }
 }
 
@@ -2579,21 +2797,15 @@ fn extract_swiftui_declaration_structure(
     decl_id: &str,
     result: &mut ExtractionResult,
 ) {
-    let mut cursor = node.walk();
-    for child in node.named_children(&mut cursor) {
-        if matches!(child.kind(), "computed_property" | "function_body") {
-            extract_swiftui_dependency_reads(child, source, file, module_path, decl_id, result);
-            let _ = extract_swiftui_structure(
-                child,
-                source,
-                file,
-                module_path,
-                decl_id,
-                decl_id,
-                result,
-            );
-        }
-    }
+    let mut context = EnrichmentContext::new(result);
+    extract_swiftui_declaration_structure_with_context(
+        node,
+        source,
+        file,
+        module_path,
+        decl_id,
+        &mut context,
+    );
 }
 
 fn type_text_looks_like_swiftui_view(type_text: &str) -> bool {
@@ -2676,6 +2888,34 @@ struct LocalizedTextCall<'a> {
     literal: Option<String>,
 }
 
+static LOCALIZED_TEXT_WRAPPER_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(
+        r#"(?s)^\s*Text\s*\(\s*(?:i18n\s*:\s*)?(?:(?:([A-Za-z_][A-Za-z0-9_]*)\s*\.\s*)|\.)([A-Za-z_][A-Za-z0-9_]*)\s*(?:\((.*)\))?\s*(?:\)|,)"#,
+    )
+    .expect("localized text wrapper regex should compile")
+});
+
+static LOCALIZED_TEXT_LITERAL_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(
+        r#"(?s)^\s*Text\s*\(\s*"((?:[^"\\]|\\.)*)"(?:\s*,\s*bundle\s*:\s*[^,)]+)?\s*(?:\)|,)"#,
+    )
+    .expect("localized text literal regex should compile")
+});
+
+static L10N_TR_METADATA_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(
+        r#"(?s)L10n\.tr\(\s*"((?:[^"\\]|\\.)*)"\s*,\s*"((?:[^"\\]|\\.)*)".*?fallback:\s*"((?:[^"\\]|\\.)*)""#,
+    )
+    .expect("L10n.tr metadata regex should compile")
+});
+
+static L10N_RESOURCE_METADATA_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(
+        r#"(?s)L10nResource\(\s*"((?:[^"\\]|\\.)*)"\s*,\s*table:\s*"((?:[^"\\]|\\.)*)".*?fallback:\s*"((?:[^"\\]|\\.)*)""#,
+    )
+    .expect("L10nResource metadata regex should compile")
+});
+
 fn decode_swift_string_literal(raw: &str) -> String {
     raw.replace(r#"\""#, "\"")
         .replace(r"\n", "\n")
@@ -2739,11 +2979,7 @@ fn function_parameter_count(node: tree_sitter::Node) -> usize {
 }
 
 fn parse_l10n_tr_metadata(text: &str, arg_count: usize) -> Option<LocalizationWrapperMetadata> {
-    let re = regex::Regex::new(
-        r#"(?s)L10n\.tr\(\s*"((?:[^"\\]|\\.)*)"\s*,\s*"((?:[^"\\]|\\.)*)".*?fallback:\s*"((?:[^"\\]|\\.)*)""#,
-    )
-    .unwrap();
-    let captures = re.captures(text)?;
+    let captures = L10N_TR_METADATA_RE.captures(text)?;
     Some(LocalizationWrapperMetadata {
         table: decode_swift_string_literal(captures.get(1)?.as_str()),
         key: decode_swift_string_literal(captures.get(2)?.as_str()),
@@ -2756,11 +2992,7 @@ fn parse_l10n_resource_metadata(
     text: &str,
     arg_count: usize,
 ) -> Option<LocalizationWrapperMetadata> {
-    let re = regex::Regex::new(
-        r#"(?s)L10nResource\(\s*"((?:[^"\\]|\\.)*)"\s*,\s*table:\s*"((?:[^"\\]|\\.)*)".*?fallback:\s*"((?:[^"\\]|\\.)*)""#,
-    )
-    .unwrap();
-    let captures = re.captures(text)?;
+    let captures = L10N_RESOURCE_METADATA_RE.captures(text)?;
     Some(LocalizationWrapperMetadata {
         table: decode_swift_string_literal(captures.get(2)?.as_str()),
         key: decode_swift_string_literal(captures.get(1)?.as_str()),
@@ -2817,11 +3049,7 @@ fn parse_localized_text_call<'a>(
         return None;
     }
 
-    let wrapper_re = regex::Regex::new(
-        r#"(?s)^\s*Text\s*\(\s*(?:i18n\s*:\s*)?(?:(?:([A-Za-z_][A-Za-z0-9_]*)\s*\.\s*)|\.)([A-Za-z_][A-Za-z0-9_]*)\s*(?:\((.*)\))?\s*(?:\)|,)"#,
-    )
-    .unwrap();
-    if let Some(captures) = wrapper_re.captures(text) {
+    if let Some(captures) = LOCALIZED_TEXT_WRAPPER_RE.captures(text) {
         let args = captures.get(3).map(|value| value.as_str()).unwrap_or("");
         return Some(LocalizedTextCall {
             node,
@@ -2833,20 +3061,18 @@ fn parse_localized_text_call<'a>(
         });
     }
 
-    let literal_re = regex::Regex::new(
-        r#"(?s)^\s*Text\s*\(\s*"((?:[^"\\]|\\.)*)"(?:\s*,\s*bundle\s*:\s*[^,)]+)?\s*(?:\)|,)"#,
-    )
-    .unwrap();
-    literal_re.captures(text).map(|captures| LocalizedTextCall {
-        node,
-        ref_kind: "literal",
-        wrapper_name: None,
-        wrapper_base: None,
-        arg_count: 0,
-        literal: Some(decode_swift_string_literal(
-            captures.get(1).unwrap().as_str(),
-        )),
-    })
+    LOCALIZED_TEXT_LITERAL_RE
+        .captures(text)
+        .map(|captures| LocalizedTextCall {
+            node,
+            ref_kind: "literal",
+            wrapper_name: None,
+            wrapper_base: None,
+            arg_count: 0,
+            literal: Some(decode_swift_string_literal(
+                captures.get(1).unwrap().as_str(),
+            )),
+        })
 }
 
 fn collect_localized_text_calls<'a>(
@@ -2865,45 +3091,20 @@ fn collect_localized_text_calls<'a>(
 }
 
 fn matching_synthetic_view_id(
-    result: &ExtractionResult,
+    context: &EnrichmentContext<'_>,
     file_path: &Path,
     view_node: tree_sitter::Node,
     name: &str,
 ) -> Option<String> {
-    let span = make_span(view_node);
-
-    let exact = result.nodes.iter().find(|node| {
-        node.kind == NodeKind::View
-            && node.name == name
-            && file_matches(&node.file, file_path)
-            && node.span.start == span.start
-            && node.span.end == span.end
-    });
-    if let Some(node) = exact {
-        return Some(node.id.clone());
-    }
-
-    result
-        .nodes
-        .iter()
-        .filter(|node| {
-            node.kind == NodeKind::View
-                && node.name == name
-                && file_matches(&node.file, file_path)
-                && line_matches(node.span.start[0], span.start[0])
-        })
-        .min_by_key(|node| {
-            node.span.start[0].abs_diff(span.start[0]) + node.span.start[1].abs_diff(span.start[1])
-        })
-        .map(|node| node.id.clone())
+    context.matching_view_id(file_path, view_node, name)
 }
 
 fn apply_wrapper_metadata(
-    result: &mut ExtractionResult,
+    context: &mut EnrichmentContext<'_>,
     node_id: &str,
     metadata: &LocalizationWrapperMetadata,
 ) {
-    let Some(node) = node_by_id_mut(result, node_id) else {
+    let Some(node) = context.node_mut(node_id) else {
         return;
     };
     node.metadata
@@ -2921,13 +3122,13 @@ fn apply_wrapper_metadata(
 }
 
 fn apply_localized_text_call(
-    result: &mut ExtractionResult,
+    context: &mut EnrichmentContext<'_>,
     file: &str,
     view_id: &str,
     call: &LocalizedTextCall<'_>,
 ) {
     {
-        let Some(node) = node_by_id_mut(result, view_id) else {
+        let Some(node) = context.node_mut(view_id) else {
             return;
         };
         node.metadata
@@ -2945,20 +3146,17 @@ fn apply_localized_text_call(
     }
 
     if let Some(wrapper_name) = &call.wrapper_name {
-        emit_unique_edge(
-            result,
-            Edge {
-                source: view_id.to_string(),
-                target: make_id(file, &[], wrapper_name),
-                kind: EdgeKind::TypeRef,
-                confidence: 0.85,
-                direction: None,
-                operation: call.wrapper_base.clone(),
-                condition: None,
-                async_boundary: None,
-                provenance: node_edge_provenance(file, call.node, view_id),
-            },
-        );
+        context.emit_edge(Edge {
+            source: view_id.to_string(),
+            target: make_id(file, &[], wrapper_name),
+            kind: EdgeKind::TypeRef,
+            confidence: 0.85,
+            direction: None,
+            operation: call.wrapper_base.clone(),
+            condition: None,
+            async_boundary: None,
+            provenance: node_edge_provenance(file, call.node, view_id),
+        });
     }
 }
 
@@ -3011,66 +3209,12 @@ fn declaration_kind(node: tree_sitter::Node) -> Option<NodeKind> {
 }
 
 fn matching_swiftui_declaration_id(
-    result: &ExtractionResult,
+    context: &EnrichmentContext<'_>,
     file_path: &Path,
     decl_node: tree_sitter::Node,
     source: &[u8],
-    candidate_owner_names: &HashMap<String, Vec<String>>,
 ) -> Option<String> {
-    let decl_line = decl_node.start_position().row;
-    let decl_name = declaration_name(decl_node, source)?;
-    let decl_kind = declaration_kind(decl_node)?;
-    let owner_name = enclosing_owner_type_name(decl_node, source);
-
-    let candidates: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|node| {
-            node.kind == decl_kind && node.name == decl_name && file_matches(&node.file, file_path)
-        })
-        .collect();
-
-    let line_matches: Vec<_> = candidates
-        .iter()
-        .copied()
-        .filter(|node| line_matches(node.span.start[0], decl_line))
-        .collect();
-    if !line_matches.is_empty() {
-        return line_matches
-            .into_iter()
-            .min_by_key(|node| node.span.start[0].abs_diff(decl_line))
-            .map(|node| node.id.clone());
-    }
-
-    if let Some(owner_name) = owner_name {
-        let owner_matches: Vec<_> = candidates
-            .iter()
-            .copied()
-            .filter(|node| {
-                candidate_owner_names
-                    .get(&node.id)
-                    .is_some_and(|owners| owners.iter().any(|owner| owner == &owner_name))
-            })
-            .collect();
-        if owner_matches.len() == 1 {
-            return Some(owner_matches[0].id.clone());
-        }
-        if !owner_matches.is_empty() {
-            return owner_matches
-                .into_iter()
-                .min_by_key(|node| node.span.start[0].abs_diff(decl_line))
-                .map(|node| node.id.clone());
-        }
-    }
-
-    if candidates.len() == 1 {
-        return Some(candidates[0].id.clone());
-    }
-
-    candidates
-        .into_iter()
-        .min_by_key(|node| node.span.start[0].abs_diff(decl_line))
-        .map(|node| node.id.clone())
+    context.matching_declaration_id(file_path, decl_node, source)
 }
 
 fn collect_swiftui_body_nodes<'a>(
@@ -3107,22 +3251,11 @@ fn collect_swiftui_body_nodes<'a>(
 }
 
 fn matching_body_id(
-    result: &ExtractionResult,
+    context: &EnrichmentContext<'_>,
     file_path: &Path,
     body_node: tree_sitter::Node,
 ) -> Option<String> {
-    let body_line = body_node.start_position().row;
-    result
-        .nodes
-        .iter()
-        .filter(|node| {
-            node.kind == NodeKind::Property
-                && node.name == "body"
-                && file_matches(&node.file, file_path)
-                && line_matches(node.span.start[0], body_line)
-        })
-        .min_by_key(|node| node.span.start[0].abs_diff(body_line))
-        .map(|node| node.id.clone())
+    context.matching_body_id(file_path, body_node)
 }
 
 fn candidate_owner_names(result: &ExtractionResult) -> HashMap<String, Vec<String>> {
@@ -3424,7 +3557,7 @@ pub fn enrich_localization_metadata_with_tree(
     tree: &Tree,
     result: &mut ExtractionResult,
 ) -> anyhow::Result<()> {
-    let candidate_owner_names = candidate_owner_names(result);
+    let mut context = EnrichmentContext::new(result);
     let file_str = file_path.to_string_lossy().to_string();
 
     let mut wrapper_nodes = Vec::new();
@@ -3433,25 +3566,22 @@ pub fn enrich_localization_metadata_with_tree(
         let Some(wrapper_metadata) = extract_wrapper_metadata(wrapper_node, source) else {
             continue;
         };
-        let Some(node_id) = matching_swiftui_declaration_id(
-            result,
-            file_path,
-            wrapper_node,
-            source,
-            &candidate_owner_names,
-        ) else {
+        let Some(node_id) =
+            matching_swiftui_declaration_id(&context, file_path, wrapper_node, source)
+        else {
             continue;
         };
-        apply_wrapper_metadata(result, &node_id, &wrapper_metadata);
+        apply_wrapper_metadata(&mut context, &node_id, &wrapper_metadata);
     }
 
     let mut localized_text_calls = Vec::new();
     collect_localized_text_calls(tree.root_node(), source, &mut localized_text_calls);
     for call in localized_text_calls {
-        let Some(view_id) = matching_synthetic_view_id(result, file_path, call.node, "Text") else {
+        let Some(view_id) = matching_synthetic_view_id(&context, file_path, call.node, "Text")
+        else {
             continue;
         };
-        apply_localized_text_call(result, &file_str, &view_id, &call);
+        apply_localized_text_call(&mut context, &file_str, &view_id, &call);
     }
 
     Ok(())
@@ -3473,27 +3603,22 @@ pub fn enrich_swiftui_structure_with_tree(
     tree: &Tree,
     result: &mut ExtractionResult,
 ) -> anyhow::Result<()> {
+    let mut context = EnrichmentContext::new(result);
     let mut declaration_nodes = Vec::new();
     collect_swiftui_declaration_nodes(tree.root_node(), source, &mut declaration_nodes);
-
-    let candidate_owner_names = candidate_owner_names(result);
 
     let file_str = file_path.to_string_lossy().to_string();
 
     let mut property_nodes = Vec::new();
     collect_property_declaration_nodes(tree.root_node(), &mut property_nodes);
     for property_node in property_nodes {
-        let Some(property_id) = matching_swiftui_declaration_id(
-            result,
-            file_path,
-            property_node,
-            source,
-            &candidate_owner_names,
-        ) else {
+        let Some(property_id) =
+            matching_swiftui_declaration_id(&context, file_path, property_node, source)
+        else {
             continue;
         };
         if let Some(metadata) = extract_swiftui_dynamic_property_metadata(property_node, source) {
-            apply_swiftui_dynamic_property_metadata(result, &property_id, &metadata);
+            apply_swiftui_dynamic_property_metadata(context.result, &property_id, &metadata);
         }
         if declaration_returns_swiftui_view(property_node, source) {
             continue;
@@ -3504,31 +3629,40 @@ pub fn enrich_swiftui_structure_with_tree(
             &file_str,
             &[],
             &property_id,
-            result,
+            &mut context,
         );
     }
 
     for decl_node in declaration_nodes {
-        let Some(decl_id) = matching_swiftui_declaration_id(
-            result,
-            file_path,
-            decl_node,
-            source,
-            &candidate_owner_names,
-        ) else {
+        let Some(decl_id) = matching_swiftui_declaration_id(&context, file_path, decl_node, source)
+        else {
             continue;
         };
-        extract_swiftui_declaration_structure(decl_node, source, &file_str, &[], &decl_id, result);
+        extract_swiftui_declaration_structure_with_context(
+            decl_node,
+            source,
+            &file_str,
+            &[],
+            &decl_id,
+            &mut context,
+        );
     }
 
     let mut body_nodes = Vec::new();
     collect_swiftui_body_nodes(tree.root_node(), source, &mut body_nodes);
 
     for body_node in body_nodes {
-        let Some(body_id) = matching_body_id(result, file_path, body_node) else {
+        let Some(body_id) = matching_body_id(&context, file_path, body_node) else {
             continue;
         };
-        extract_swiftui_declaration_structure(body_node, source, &file_str, &[], &body_id, result);
+        extract_swiftui_declaration_structure_with_context(
+            body_node,
+            source,
+            &file_str,
+            &[],
+            &body_id,
+            &mut context,
+        );
     }
 
     Ok(())

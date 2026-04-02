@@ -8,10 +8,39 @@ use grapha_core::graph::{
     Edge, EdgeKind, EdgeProvenance, Graph, Node, NodeKind, NodeRole, Span, Visibility,
 };
 
-const STORE_SCHEMA_VERSION: &str = "4";
+const STORE_SCHEMA_VERSION: &str = "5";
 
 pub struct SqliteStore {
     path: PathBuf,
+}
+
+fn serialize_provenance(provenance: &[EdgeProvenance]) -> anyhow::Result<Vec<u8>> {
+    if provenance.is_empty() {
+        return Ok(Vec::new());
+    }
+    Ok(bincode::serialize(provenance)?)
+}
+
+fn deserialize_provenance(blob: &[u8]) -> anyhow::Result<Vec<EdgeProvenance>> {
+    if blob.is_empty() {
+        return Ok(Vec::new());
+    }
+    Ok(bincode::deserialize(blob)?)
+}
+
+fn remove_existing_store_files(path: &PathBuf) -> anyhow::Result<()> {
+    for candidate in [
+        path.clone(),
+        PathBuf::from(format!("{}-wal", path.to_string_lossy())),
+        PathBuf::from(format!("{}-shm", path.to_string_lossy())),
+    ] {
+        match std::fs::remove_file(&candidate) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
 }
 
 impl SqliteStore {
@@ -70,7 +99,7 @@ impl SqliteStore {
                 operation  TEXT,
                 condition  TEXT,
                 async_boundary INTEGER,
-                provenance TEXT NOT NULL
+                provenance BLOB NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_edges_source ON edges(source);
             CREATE INDEX IF NOT EXISTS idx_edges_target ON edges(target);
@@ -201,16 +230,11 @@ impl SqliteStore {
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)"
         );
         let mut stmt = tx.prepare_cached(&sql)?;
-        let empty_provenance = "[]";
         for (edge_id, edge) in edges {
             let direction_str: Option<&str> = edge.direction.as_ref().map(flow_direction_str);
             let async_boundary_int: Option<i64> =
                 edge.async_boundary.map(|b| if b { 1 } else { 0 });
-            let provenance = if edge.provenance.is_empty() {
-                empty_provenance.to_string()
-            } else {
-                serde_json::to_string(&edge.provenance)?
-            };
+            let provenance = serialize_provenance(&edge.provenance)?;
             stmt.execute(rusqlite::params![
                 edge_id,
                 edge.source,
@@ -228,6 +252,7 @@ impl SqliteStore {
     }
 
     fn save_full(&self, graph: &Graph) -> anyhow::Result<()> {
+        remove_existing_store_files(&self.path)?;
         let conn = Connection::open(&self.path)?;
         // For full rebuild: journal OFF (no crash safety needed — just redo),
         // locking_mode EXCLUSIVE (no readers during rebuild),
@@ -282,7 +307,7 @@ impl SqliteStore {
                 operation  TEXT,
                 condition  TEXT,
                 async_boundary INTEGER,
-                provenance TEXT NOT NULL
+                provenance BLOB NOT NULL
             );",
         )?;
 
@@ -529,6 +554,60 @@ impl Store for SqliteStore {
         };
 
         let edges = if schema_version.as_deref() == Some(STORE_SCHEMA_VERSION) {
+            let mut stmt = conn.prepare(
+                "SELECT source, target, kind, confidence,
+                        direction, operation, condition, async_boundary, provenance
+                 FROM edges",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, f64>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                    row.get::<_, Option<i64>>(7)?,
+                    row.get::<_, Vec<u8>>(8)?,
+                ))
+            })?;
+
+            let mut edges = Vec::new();
+            for row in rows {
+                let (
+                    source,
+                    target,
+                    kind_str,
+                    confidence,
+                    direction_str,
+                    operation,
+                    condition,
+                    async_boundary_int,
+                    provenance_blob,
+                ) = row?;
+                let kind: EdgeKind = str_to_enum(&kind_str)
+                    .map_err(|e| anyhow::anyhow!("invalid edge kind '{kind_str}': {e}"))?;
+                let direction = direction_str
+                    .map(|s| str_to_enum(&s))
+                    .transpose()
+                    .map_err(|e| anyhow::anyhow!("invalid flow direction: {e}"))?;
+                let async_boundary = async_boundary_int.map(|v| v != 0);
+                let provenance = deserialize_provenance(&provenance_blob)?;
+                edges.push(Edge {
+                    source,
+                    target,
+                    kind,
+                    confidence,
+                    direction,
+                    operation,
+                    condition,
+                    async_boundary,
+                    provenance,
+                });
+            }
+            edges
+        } else if schema_version.as_deref() == Some("4") {
             let mut stmt = conn.prepare(
                 "SELECT source, target, kind, confidence,
                         direction, operation, condition, async_boundary, provenance
@@ -1156,6 +1235,150 @@ mod tests {
             )
             .unwrap();
         assert_eq!(edge_columns, 1);
+    }
+
+    #[test]
+    fn sqlite_load_reads_schema_v4_json_provenance() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("schema-v4.db");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE meta (
+                key   TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+            CREATE TABLE nodes (
+                id         TEXT PRIMARY KEY,
+                kind       TEXT NOT NULL,
+                name       TEXT NOT NULL,
+                file       TEXT NOT NULL,
+                span_start_line   INTEGER NOT NULL,
+                span_start_col    INTEGER NOT NULL,
+                span_end_line     INTEGER NOT NULL,
+                span_end_col      INTEGER NOT NULL,
+                visibility TEXT NOT NULL,
+                metadata   TEXT NOT NULL,
+                role       TEXT,
+                signature  TEXT,
+                doc_comment TEXT,
+                module     TEXT,
+                snippet    TEXT
+            );
+            CREATE TABLE edges (
+                edge_id    TEXT PRIMARY KEY,
+                source     TEXT NOT NULL,
+                target     TEXT NOT NULL,
+                kind       TEXT NOT NULL,
+                confidence REAL NOT NULL,
+                direction  TEXT,
+                operation  TEXT,
+                condition  TEXT,
+                async_boundary INTEGER,
+                provenance TEXT NOT NULL
+            );
+            INSERT INTO meta (key, value) VALUES ('version', '0.1.0');
+            INSERT INTO meta (key, value) VALUES ('store_schema_version', '4');",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO nodes (
+                id, kind, name, file,
+                span_start_line, span_start_col, span_end_line, span_end_col,
+                visibility, metadata, role, signature, doc_comment, module, snippet
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+            rusqlite::params![
+                "main",
+                "function",
+                "main",
+                "main.swift",
+                0_i64,
+                0_i64,
+                1_i64,
+                0_i64,
+                "public",
+                "{}",
+                Option::<String>::None,
+                Option::<String>::None,
+                Option::<String>::None,
+                Option::<String>::None,
+                Option::<String>::None,
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO edges (
+                edge_id, source, target, kind, confidence,
+                direction, operation, condition, async_boundary, provenance
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            rusqlite::params![
+                "main::calls::helper",
+                "main",
+                "helper",
+                "calls",
+                1.0_f64,
+                Option::<String>::None,
+                Option::<String>::None,
+                Option::<String>::None,
+                Option::<i64>::None,
+                r#"[{"file":"main.swift","span":{"start":[0,0],"end":[0,4]},"symbol_id":"main"}]"#,
+            ],
+        )
+        .unwrap();
+        drop(conn);
+
+        let store = SqliteStore::new(path);
+        let loaded = store.load().unwrap();
+
+        assert_eq!(loaded.nodes.len(), 1);
+        assert_eq!(loaded.edges.len(), 1);
+        assert_eq!(loaded.edges[0].source, "main");
+        assert_eq!(
+            loaded.edges[0].provenance,
+            vec![EdgeProvenance {
+                file: Path::new("main.swift").into(),
+                span: Span {
+                    start: [0, 0],
+                    end: [0, 4],
+                },
+                symbol_id: "main".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn sqlite_full_rebuild_uses_large_page_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("page-size.db");
+        let store = SqliteStore::new(path.clone());
+        let graph = Graph {
+            version: "0.1.0".to_string(),
+            nodes: vec![Node {
+                id: "main".to_string(),
+                kind: NodeKind::Function,
+                name: "main".to_string(),
+                file: Path::new("main.rs").into(),
+                span: Span {
+                    start: [0, 0],
+                    end: [1, 0],
+                },
+                visibility: Visibility::Public,
+                metadata: HashMap::new(),
+                role: None,
+                signature: None,
+                doc_comment: None,
+                module: None,
+                snippet: None,
+            }],
+            edges: vec![],
+        };
+
+        store.save(&graph).unwrap();
+
+        let conn = Connection::open(path).unwrap();
+        let page_size: i64 = conn
+            .query_row("PRAGMA page_size", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(page_size, 8192);
     }
 
     #[test]
