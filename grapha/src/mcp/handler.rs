@@ -266,7 +266,7 @@ pub fn handle_tool_call(state: &mut McpState, tool_name: &str, arguments: &Value
 }
 
 /// Pre-resolve a symbol query using recall to break ties, returning the node ID.
-fn resolve_symbol<'a>(state: &'a mut McpState, query: &str) -> Result<String, Value> {
+fn resolve_symbol(state: &mut McpState, query: &str) -> Result<String, Value> {
     match recall::resolve_with_recall(&state.graph.nodes, query, &mut state.recall) {
         Ok(node) => Ok(node.id.clone()),
         Err(e) => Err(tool_error(format_query_error(&e))),

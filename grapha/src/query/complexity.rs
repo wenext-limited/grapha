@@ -172,7 +172,7 @@ pub fn query_complexity(graph: &Graph, query: &str) -> Result<ComplexityResult, 
         .iter()
         .filter_map(|id| node_index.get(*id).copied())
         .filter(|n| n.kind == NodeKind::Function && n.name.starts_with("init("))
-        .map(|n| count_init_params(n))
+        .map(count_init_params)
         .max()
         .unwrap_or(0);
 

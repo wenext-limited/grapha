@@ -37,7 +37,7 @@ impl Recall {
     }
 
     /// Given an ambiguous set of candidates, suggest the one that was previously resolved.
-    pub fn suggest<'a>(&self, query: &str, candidates: &[QueryCandidate]) -> Option<String> {
+    pub fn suggest(&self, query: &str, candidates: &[QueryCandidate]) -> Option<String> {
         let base = base_name(query).to_lowercase();
         let entry = self.history.get(&base)?;
         // Only suggest if the previously resolved ID is still among the candidates
@@ -79,11 +79,11 @@ pub fn resolve_with_recall<'a>(
             ref query,
             ref candidates,
         }) => {
-            if let Some(suggested_id) = recall.suggest(query, candidates) {
-                if let Some(node) = nodes.iter().find(|n| n.id == suggested_id) {
-                    recall.record(query_str, &node.id);
-                    return Ok(node);
-                }
+            if let Some(suggested_id) = recall.suggest(query, candidates)
+                && let Some(node) = nodes.iter().find(|n| n.id == suggested_id)
+            {
+                recall.record(query_str, &node.id);
+                return Ok(node);
             }
             Err(QueryResolveError::Ambiguous {
                 query: query.clone(),

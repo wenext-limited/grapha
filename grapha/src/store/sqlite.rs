@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, OptionalExtension};
 
@@ -8,7 +8,8 @@ use grapha_core::graph::{
     Edge, EdgeKind, EdgeProvenance, Graph, Node, NodeKind, NodeRole, Span, Visibility,
 };
 
-const STORE_SCHEMA_VERSION: &str = "5";
+const STORE_SCHEMA_VERSION: &str = "6";
+const BINARY_PROVENANCE_SCHEMA_VERSION: &str = "5";
 
 pub struct SqliteStore {
     path: PathBuf,
@@ -28,9 +29,9 @@ fn deserialize_provenance(blob: &[u8]) -> anyhow::Result<Vec<EdgeProvenance>> {
     Ok(bincode::deserialize(blob)?)
 }
 
-fn remove_existing_store_files(path: &PathBuf) -> anyhow::Result<()> {
+fn remove_existing_store_files(path: &Path) -> anyhow::Result<()> {
     for candidate in [
-        path.clone(),
+        path.to_path_buf(),
         PathBuf::from(format!("{}-wal", path.to_string_lossy())),
         PathBuf::from(format!("{}-shm", path.to_string_lossy())),
     ] {
@@ -100,15 +101,7 @@ impl SqliteStore {
                 condition  TEXT,
                 async_boundary INTEGER,
                 provenance BLOB NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_edges_source ON edges(source);
-            CREATE INDEX IF NOT EXISTS idx_edges_target ON edges(target);
-            CREATE INDEX IF NOT EXISTS idx_edges_kind   ON edges(kind);
-            CREATE INDEX IF NOT EXISTS idx_nodes_name   ON nodes(name);
-            CREATE INDEX IF NOT EXISTS idx_nodes_file   ON nodes(file);
-            CREATE INDEX IF NOT EXISTS idx_nodes_kind   ON nodes(kind);
-            CREATE INDEX IF NOT EXISTS idx_nodes_role   ON nodes(role);
-            CREATE INDEX IF NOT EXISTS idx_nodes_module ON nodes(module);",
+            );",
         )?;
         Ok(())
     }
@@ -145,20 +138,6 @@ impl SqliteStore {
             "INSERT INTO meta (key, value) VALUES ('store_schema_version', ?1)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             [STORE_SCHEMA_VERSION],
-        )?;
-        Ok(())
-    }
-
-    fn create_indexes(conn: &Connection) -> anyhow::Result<()> {
-        conn.execute_batch(
-            "CREATE INDEX IF NOT EXISTS idx_edges_source ON edges(source);
-             CREATE INDEX IF NOT EXISTS idx_edges_target ON edges(target);
-             CREATE INDEX IF NOT EXISTS idx_edges_kind   ON edges(kind);
-             CREATE INDEX IF NOT EXISTS idx_nodes_name   ON nodes(name);
-             CREATE INDEX IF NOT EXISTS idx_nodes_file   ON nodes(file);
-             CREATE INDEX IF NOT EXISTS idx_nodes_kind   ON nodes(kind);
-             CREATE INDEX IF NOT EXISTS idx_nodes_role   ON nodes(role);
-             CREATE INDEX IF NOT EXISTS idx_nodes_module ON nodes(module);",
         )?;
         Ok(())
     }
@@ -328,7 +307,6 @@ impl SqliteStore {
             "CREATE UNIQUE INDEX idx_nodes_id ON nodes(id);
              CREATE UNIQUE INDEX idx_edges_id ON edges(edge_id);",
         )?;
-        Self::create_indexes(&conn)?;
         conn.execute_batch("PRAGMA optimize;")?;
         Ok(())
     }
@@ -418,7 +396,6 @@ impl Store for SqliteStore {
             return Ok(full_stats);
         }
 
-        Self::create_tables(&conn)?;
         let previous_graph = previous.expect("checked is_some above");
         let delta = GraphDelta::between(previous_graph, graph);
         let tx = conn.unchecked_transaction()?;
@@ -459,7 +436,6 @@ impl Store for SqliteStore {
             true,
         )?;
         tx.commit()?;
-        Self::create_indexes(&conn)?;
         conn.execute_batch("PRAGMA optimize;")?;
 
         Ok(current_stats)
@@ -553,7 +529,10 @@ impl Store for SqliteStore {
             nodes
         };
 
-        let edges = if schema_version.as_deref() == Some(STORE_SCHEMA_VERSION) {
+        let edges = if matches!(
+            schema_version.as_deref(),
+            Some(STORE_SCHEMA_VERSION) | Some(BINARY_PROVENANCE_SCHEMA_VERSION)
+        ) {
             let mut stmt = conn.prepare(
                 "SELECT source, target, kind, confidence,
                         direction, operation, condition, async_boundary, provenance
@@ -1346,6 +1325,111 @@ mod tests {
     }
 
     #[test]
+    fn sqlite_load_reads_schema_v5_binary_provenance() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("schema-v5.db");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE meta (
+                key   TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+            CREATE TABLE nodes (
+                id         TEXT PRIMARY KEY,
+                kind       TEXT NOT NULL,
+                name       TEXT NOT NULL,
+                file       TEXT NOT NULL,
+                span_start_line   INTEGER NOT NULL,
+                span_start_col    INTEGER NOT NULL,
+                span_end_line     INTEGER NOT NULL,
+                span_end_col      INTEGER NOT NULL,
+                visibility TEXT NOT NULL,
+                metadata   TEXT NOT NULL,
+                role       TEXT,
+                signature  TEXT,
+                doc_comment TEXT,
+                module     TEXT,
+                snippet    TEXT
+            );
+            CREATE TABLE edges (
+                edge_id    TEXT PRIMARY KEY,
+                source     TEXT NOT NULL,
+                target     TEXT NOT NULL,
+                kind       TEXT NOT NULL,
+                confidence REAL NOT NULL,
+                direction  TEXT,
+                operation  TEXT,
+                condition  TEXT,
+                async_boundary INTEGER,
+                provenance BLOB NOT NULL
+            );
+            INSERT INTO meta (key, value) VALUES ('version', '0.1.0');
+            INSERT INTO meta (key, value) VALUES ('store_schema_version', '5');",
+        )
+        .unwrap();
+        let provenance = vec![EdgeProvenance {
+            file: Path::new("main.swift").into(),
+            span: Span {
+                start: [0, 0],
+                end: [0, 4],
+            },
+            symbol_id: "main".to_string(),
+        }];
+        conn.execute(
+            "INSERT INTO nodes (
+                id, kind, name, file,
+                span_start_line, span_start_col, span_end_line, span_end_col,
+                visibility, metadata, role, signature, doc_comment, module, snippet
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+            rusqlite::params![
+                "main",
+                "function",
+                "main",
+                "main.swift",
+                0_i64,
+                0_i64,
+                1_i64,
+                0_i64,
+                "public",
+                "{}",
+                Option::<String>::None,
+                Option::<String>::None,
+                Option::<String>::None,
+                Option::<String>::None,
+                Option::<String>::None,
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO edges (
+                edge_id, source, target, kind, confidence,
+                direction, operation, condition, async_boundary, provenance
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            rusqlite::params![
+                "main::calls::helper",
+                "main",
+                "helper",
+                "calls",
+                1.0_f64,
+                Option::<String>::None,
+                Option::<String>::None,
+                Option::<String>::None,
+                Option::<i64>::None,
+                serialize_provenance(&provenance).unwrap(),
+            ],
+        )
+        .unwrap();
+        drop(conn);
+
+        let store = SqliteStore::new(path);
+        let loaded = store.load().unwrap();
+
+        assert_eq!(loaded.nodes.len(), 1);
+        assert_eq!(loaded.edges.len(), 1);
+        assert_eq!(loaded.edges[0].provenance, provenance);
+    }
+
+    #[test]
     fn sqlite_full_rebuild_uses_large_page_size() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("page-size.db");
@@ -1379,6 +1463,73 @@ mod tests {
             .query_row("PRAGMA page_size", [], |row| row.get(0))
             .unwrap();
         assert_eq!(page_size, 8192);
+    }
+
+    #[test]
+    fn sqlite_full_rebuild_drops_unused_secondary_indexes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index-shape.db");
+        let store = SqliteStore::new(path.clone());
+        let graph = Graph {
+            version: "0.1.0".to_string(),
+            nodes: vec![Node {
+                id: "main".to_string(),
+                kind: NodeKind::Function,
+                name: "main".to_string(),
+                file: Path::new("main.rs").into(),
+                span: Span {
+                    start: [0, 0],
+                    end: [1, 0],
+                },
+                visibility: Visibility::Public,
+                metadata: HashMap::new(),
+                role: None,
+                signature: None,
+                doc_comment: None,
+                module: None,
+                snippet: None,
+            }],
+            edges: vec![Edge {
+                source: "main".to_string(),
+                target: "helper".to_string(),
+                kind: EdgeKind::Calls,
+                confidence: 1.0,
+                direction: None,
+                operation: None,
+                condition: None,
+                async_boundary: None,
+                provenance: Vec::new(),
+            }],
+        };
+
+        store.save(&graph).unwrap();
+
+        let conn = Connection::open(path).unwrap();
+        let indexes: Vec<String> = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT name
+                     FROM sqlite_master
+                     WHERE type = 'index'
+                     ORDER BY name",
+                )
+                .unwrap();
+            stmt.query_map([], |row| row.get::<_, String>(0))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+
+        assert!(indexes.iter().any(|name| name == "idx_nodes_id"));
+        assert!(indexes.iter().any(|name| name == "idx_edges_id"));
+        assert!(!indexes.iter().any(|name| name == "idx_edges_source"));
+        assert!(!indexes.iter().any(|name| name == "idx_edges_target"));
+        assert!(!indexes.iter().any(|name| name == "idx_edges_kind"));
+        assert!(!indexes.iter().any(|name| name == "idx_nodes_name"));
+        assert!(!indexes.iter().any(|name| name == "idx_nodes_file"));
+        assert!(!indexes.iter().any(|name| name == "idx_nodes_kind"));
+        assert!(!indexes.iter().any(|name| name == "idx_nodes_role"));
+        assert!(!indexes.iter().any(|name| name == "idx_nodes_module"));
     }
 
     #[test]

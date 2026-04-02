@@ -6,7 +6,6 @@ mod config;
 mod delta;
 mod fields;
 mod filter;
-mod hash_cache;
 mod localization;
 mod mcp;
 mod progress;

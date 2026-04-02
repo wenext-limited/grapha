@@ -247,6 +247,17 @@ fn read_edge(chunk: &[u8], string_table: &[u8]) -> Option<Edge> {
 mod tests {
     use super::*;
 
+    struct PackedNodeSpec {
+        id: [u32; 2],
+        name: [u32; 2],
+        file: [u32; 2],
+        module: [u32; 2],
+        start: [u32; 2],
+        end: [u32; 2],
+        kind: u8,
+        visibility: u8,
+    }
+
     /// Build a minimal valid binary buffer with the given nodes, edges, and string table.
     fn build_buffer(
         node_chunks: &[Vec<u8>],
@@ -285,31 +296,22 @@ mod tests {
         buf
     }
 
-    fn make_packed_node(
-        id: [u32; 2],
-        name: [u32; 2],
-        file: [u32; 2],
-        module: [u32; 2],
-        start: [u32; 2],
-        end: [u32; 2],
-        kind: u8,
-        visibility: u8,
-    ) -> Vec<u8> {
+    fn make_packed_node(spec: PackedNodeSpec) -> Vec<u8> {
         let mut chunk = Vec::with_capacity(PACKED_NODE_SIZE);
-        chunk.extend_from_slice(&id[0].to_le_bytes());
-        chunk.extend_from_slice(&id[1].to_le_bytes());
-        chunk.extend_from_slice(&name[0].to_le_bytes());
-        chunk.extend_from_slice(&name[1].to_le_bytes());
-        chunk.extend_from_slice(&file[0].to_le_bytes());
-        chunk.extend_from_slice(&file[1].to_le_bytes());
-        chunk.extend_from_slice(&module[0].to_le_bytes());
-        chunk.extend_from_slice(&module[1].to_le_bytes());
-        chunk.extend_from_slice(&start[0].to_le_bytes());
-        chunk.extend_from_slice(&start[1].to_le_bytes());
-        chunk.extend_from_slice(&end[0].to_le_bytes());
-        chunk.extend_from_slice(&end[1].to_le_bytes());
-        chunk.push(kind);
-        chunk.push(visibility);
+        chunk.extend_from_slice(&spec.id[0].to_le_bytes());
+        chunk.extend_from_slice(&spec.id[1].to_le_bytes());
+        chunk.extend_from_slice(&spec.name[0].to_le_bytes());
+        chunk.extend_from_slice(&spec.name[1].to_le_bytes());
+        chunk.extend_from_slice(&spec.file[0].to_le_bytes());
+        chunk.extend_from_slice(&spec.file[1].to_le_bytes());
+        chunk.extend_from_slice(&spec.module[0].to_le_bytes());
+        chunk.extend_from_slice(&spec.module[1].to_le_bytes());
+        chunk.extend_from_slice(&spec.start[0].to_le_bytes());
+        chunk.extend_from_slice(&spec.start[1].to_le_bytes());
+        chunk.extend_from_slice(&spec.end[0].to_le_bytes());
+        chunk.extend_from_slice(&spec.end[1].to_le_bytes());
+        chunk.push(spec.kind);
+        chunk.push(spec.visibility);
         chunk.extend_from_slice(&[0u8; 2]); // pad
         chunk
     }
@@ -379,16 +381,16 @@ mod tests {
         //               "MyApp" (31..36), "s::MyApp::bar" (36..49)
         let string_table = b"s::MyApp::foofoo/src/main.swiftMyApps::MyApp::bar";
 
-        let node = make_packed_node(
-            [0, 13],  // id: "s::MyApp::foo"
-            [13, 3],  // name: "foo"
-            [16, 15], // file: "/src/main.swift"
-            [31, 5],  // module: "MyApp"
-            [42, 10], // line 42, col 10
-            [42, 18], // end line 42, end col 18
-            0,        // kind: Function
-            0,        // visibility: Public
-        );
+        let node = make_packed_node(PackedNodeSpec {
+            id: [0, 13],     // id: "s::MyApp::foo"
+            name: [13, 3],   // name: "foo"
+            file: [16, 15],  // file: "/src/main.swift"
+            module: [31, 5], // module: "MyApp"
+            start: [42, 10], // line 42, col 10
+            end: [42, 18],   // end line 42, end col 18
+            kind: 0,         // kind: Function
+            visibility: 0,   // visibility: Public
+        });
 
         let edge = make_packed_edge(
             0, 13, // source: "s::MyApp::foo"
@@ -423,16 +425,16 @@ mod tests {
     #[test]
     fn test_string_out_of_bounds_returns_none() {
         // Node references string at offset 999 which is beyond the string table
-        let node = make_packed_node(
-            [999, 5], // id offset way out of bounds
-            [0, 3],
-            [0, 3],
-            [NO_MODULE, 0],
-            [1, 0],
-            [1, 0],
-            0,
-            0,
-        );
+        let node = make_packed_node(PackedNodeSpec {
+            id: [999, 5], // id offset way out of bounds
+            name: [0, 3],
+            file: [0, 3],
+            module: [NO_MODULE, 0],
+            start: [1, 0],
+            end: [1, 0],
+            kind: 0,
+            visibility: 0,
+        });
 
         let buf = build_buffer(&[node], &[], &[], b"abc");
         assert!(parse_binary_buffer(&buf).is_none());
