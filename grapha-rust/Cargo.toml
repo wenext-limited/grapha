@@ -2,9 +2,16 @@
 name = "grapha-rust"
 version = "0.1.0"
 edition = "2024"
+description = "Rust extractor for Grapha based on tree-sitter"
+license = "MIT"
+repository = "https://github.com/WendellXY/grapha"
+homepage = "https://github.com/WendellXY/grapha"
+readme = "../README.md"
+keywords = ["code-intelligence", "graph", "analysis", "rust", "tree-sitter"]
+categories = ["development-tools", "parser-implementations"]
 
 [dependencies]
-grapha-core = { path = "../grapha-core" }
+grapha-core = { version = "0.1.0", path = "../grapha-core" }
 anyhow = "1"
 tree-sitter = "0.25"
 tree-sitter-rust = "0.23"

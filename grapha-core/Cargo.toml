@@ -2,6 +2,13 @@
 name = "grapha-core"
 version = "0.1.0"
 edition = "2024"
+description = "Shared graph types and extraction traits for Grapha"
+license = "MIT"
+repository = "https://github.com/WendellXY/grapha"
+homepage = "https://github.com/WendellXY/grapha"
+readme = "../README.md"
+keywords = ["code-intelligence", "graph", "analysis", "swift", "rust"]
+categories = ["development-tools", "parser-implementations"]
 
 [dependencies]
 anyhow = "1"

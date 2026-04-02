@@ -2,9 +2,16 @@
 name = "grapha-swift"
 version = "0.1.0"
 edition = "2024"
+description = "Swift extraction waterfall for Grapha using index store, SwiftSyntax, and tree-sitter"
+license = "MIT"
+repository = "https://github.com/WendellXY/grapha"
+homepage = "https://github.com/WendellXY/grapha"
+readme = "../README.md"
+keywords = ["code-intelligence", "graph", "analysis", "swift", "tree-sitter"]
+categories = ["development-tools", "parser-implementations"]
 
 [dependencies]
-grapha-core = { path = "../grapha-core" }
+grapha-core = { version = "0.1.0", path = "../grapha-core" }
 anyhow = "1"
 tree-sitter = "0.25"
 tree-sitter-swift = "0.7"
