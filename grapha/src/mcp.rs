@@ -124,7 +124,7 @@ fn dispatch(
             json!({
                 "protocolVersion": "2024-11-05",
                 "capabilities": { "tools": {} },
-                "serverInfo": { "name": "grapha", "version": "0.1.0" }
+                "serverInfo": { "name": "grapha", "version": env!("CARGO_PKG_VERSION") }
             }),
         ),
         "tools/list" => {
