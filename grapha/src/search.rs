@@ -1,8 +1,9 @@
 use std::path::Path;
 
 use anyhow::Result;
+use regex::Regex;
 use serde::Serialize;
-use tantivy::collector::TopDocs;
+use tantivy::collector::{Count, TopDocs};
 use tantivy::query::{BooleanQuery, Occur, QueryParser, TermQuery};
 use tantivy::schema::{IndexRecordOption, STORED, STRING, Schema, TEXT, Value};
 use tantivy::{Index, IndexWriter, ReloadPolicy, TantivyDocument, Term, doc};
@@ -28,7 +29,6 @@ pub struct SearchResult {
 pub struct SearchOptions {
     pub kind: Option<String>,
     pub module: Option<String>,
-    #[allow(dead_code)] // Populated by CLI/MCP; filtering not yet implemented
     pub file_glob: Option<String>,
     pub role: Option<String>,
     pub fuzzy: bool,
@@ -110,7 +110,7 @@ fn role_to_string(role: &Option<NodeRole>) -> String {
     match role {
         Some(NodeRole::EntryPoint) => "entry_point".to_string(),
         Some(NodeRole::Terminal { .. }) => "terminal".to_string(),
-        _ => String::new(),
+        Some(NodeRole::Internal) | None => "internal".to_string(),
     }
 }
 
@@ -255,6 +255,37 @@ fn build_fuzzy_regex(query: &str) -> String {
     pattern
 }
 
+fn normalize_file_match_input(input: &str) -> String {
+    input.replace('\\', "/").to_lowercase()
+}
+
+fn has_glob_metacharacters(pattern: &str) -> bool {
+    pattern.contains('*') || pattern.contains('?')
+}
+
+fn build_file_filter_regex(pattern: &str) -> Result<Regex> {
+    let normalized = normalize_file_match_input(pattern);
+    let mut regex = String::new();
+
+    if has_glob_metacharacters(&normalized) {
+        regex.push('^');
+        for ch in normalized.chars() {
+            match ch {
+                '*' => regex.push_str(".*"),
+                '?' => regex.push('.'),
+                _ => regex.push_str(&regex::escape(&ch.to_string())),
+            }
+        }
+        regex.push('$');
+    } else {
+        regex.push_str("^.*");
+        regex.push_str(&regex::escape(&normalized));
+        regex.push('$');
+    }
+
+    Ok(Regex::new(&regex)?)
+}
+
 pub fn search_filtered(
     index: &Index,
     query_str: &str,
@@ -312,7 +343,22 @@ pub fn search_filtered(
     }
 
     let final_query = BooleanQuery::new(clauses);
-    let top_docs = searcher.search(&final_query, &TopDocs::with_limit(limit))?;
+    let file_filter = options
+        .file_glob
+        .as_deref()
+        .map(build_file_filter_regex)
+        .transpose()?;
+    let candidate_limit = if file_filter.is_some() {
+        searcher.search(&final_query, &Count)?
+    } else {
+        limit
+    };
+
+    if candidate_limit == 0 {
+        return Ok(Vec::new());
+    }
+
+    let top_docs = searcher.search(&final_query, &TopDocs::with_limit(candidate_limit))?;
 
     let mut results = Vec::new();
     for (score, doc_address) in top_docs {
@@ -323,13 +369,19 @@ pub fn search_filtered(
                 .unwrap_or("")
                 .to_string()
         };
+        let file_val = get_str(fields.file);
+        if let Some(regex) = &file_filter
+            && !regex.is_match(&normalize_file_match_input(&file_val))
+        {
+            continue;
+        }
         let module_val = get_str(fields.module);
         let role_val = get_str(fields.role);
         results.push(SearchResult {
             id: get_str(fields.id),
             name: get_str(fields.name),
             kind: get_str(fields.kind),
-            file: get_str(fields.file),
+            file: file_val,
             score,
             module: if module_val.is_empty() {
                 None
@@ -342,6 +394,9 @@ pub fn search_filtered(
                 Some(role_val)
             },
         });
+        if results.len() == limit {
+            break;
+        }
     }
 
     Ok(results)
@@ -652,6 +707,51 @@ mod tests {
         let results = search_filtered(&index, "fetch_data", 10, &options).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].role.as_deref(), Some("terminal"));
+    }
+
+    #[test]
+    fn filter_by_role_internal() {
+        let dir = tempfile::tempdir().unwrap();
+        let graph = make_rich_test_graph();
+        let index = build_index(&graph, dir.path()).unwrap();
+        let options = SearchOptions {
+            role: Some("internal".into()),
+            ..Default::default()
+        };
+        let results = search_filtered(&index, "Config", 10, &options).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].name, "Config");
+        assert_eq!(results[0].role.as_deref(), Some("internal"));
+    }
+
+    #[test]
+    fn filter_by_file_suffix() {
+        let dir = tempfile::tempdir().unwrap();
+        let graph = make_rich_test_graph();
+        let index = build_index(&graph, dir.path()).unwrap();
+        let options = SearchOptions {
+            file_glob: Some("Config.swift".into()),
+            ..Default::default()
+        };
+        let results = search_filtered(&index, "Config", 10, &options).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].name, "Config");
+        assert_eq!(results[0].file, "Sources/Core/Config.swift");
+    }
+
+    #[test]
+    fn filter_by_file_glob() {
+        let dir = tempfile::tempdir().unwrap();
+        let graph = make_rich_test_graph();
+        let index = build_index(&graph, dir.path()).unwrap();
+        let options = SearchOptions {
+            file_glob: Some("Sources/*/Persist.swift".into()),
+            ..Default::default()
+        };
+        let results = search_filtered(&index, "save_config", 10, &options).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].name, "save_config");
+        assert_eq!(results[0].file, "Sources/Core/Persist.swift");
     }
 
     #[test]
