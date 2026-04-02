@@ -1020,7 +1020,6 @@ fn handle_symbol_command(
             fields,
         } => {
             let field_set = resolve_field_set(&fields, &path);
-            let _render_options = render_options.with_fields(field_set);
             let index = open_search_index(&path)?;
             let options = search::SearchOptions {
                 kind,
@@ -1032,14 +1031,13 @@ fn handle_symbol_command(
             let t = Instant::now();
             let results = search::search_filtered(&index, &query, limit, &options)?;
             let elapsed = t.elapsed();
-
-            if context {
-                let graph = load_graph(&path)?;
-                let enriched = search::enrich_with_context(&results, &graph);
-                print_json(&enriched)?;
+            let graph = if search::needs_graph_for_projection(field_set, context) {
+                Some(load_graph(&path)?)
             } else {
-                print_json(&results)?;
-            }
+                None
+            };
+            let projected = search::project_results(&results, graph.as_ref(), field_set, context);
+            print_json(&projected)?;
 
             eprintln!(
                 "\n  {} results in {:.1}ms",

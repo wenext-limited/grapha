@@ -6,6 +6,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 
+use crate::fields::FieldSet;
 use crate::query;
 
 use super::AppState;
@@ -79,6 +80,15 @@ pub struct SearchParams {
     pub q: String,
     #[serde(default = "default_limit")]
     pub limit: usize,
+    pub kind: Option<String>,
+    pub module: Option<String>,
+    pub file: Option<String>,
+    pub role: Option<String>,
+    #[serde(default)]
+    pub fuzzy: bool,
+    #[serde(default)]
+    pub context: bool,
+    pub fields: Option<String>,
 }
 
 fn default_limit() -> usize {
@@ -89,9 +99,125 @@ pub async fn get_search(
     State(state): State<Arc<AppState>>,
     Query(params): Query<SearchParams>,
 ) -> Json<serde_json::Value> {
-    let options = crate::search::SearchOptions::default();
+    let options = crate::search::SearchOptions {
+        kind: params.kind,
+        module: params.module,
+        file_glob: params.file,
+        role: params.role,
+        fuzzy: params.fuzzy,
+    };
     let results =
         crate::search::search_filtered(&state.search_index, &params.q, params.limit, &options)
             .unwrap_or_default();
-    Json(serde_json::json!({ "results": results, "total": results.len() }))
+    let fields = params
+        .fields
+        .as_deref()
+        .map(FieldSet::parse)
+        .unwrap_or_default();
+    let graph =
+        crate::search::needs_graph_for_projection(fields, params.context).then_some(&state.graph);
+    let projected = crate::search::project_results(&results, graph, fields, params.context);
+    Json(serde_json::json!({ "results": projected, "total": results.len() }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::search;
+    use crate::serve::AppState;
+    use grapha_core::graph::{Edge, EdgeKind, Graph, Node, NodeKind, NodeRole, Span, Visibility};
+    use std::collections::HashMap;
+    use tempfile::tempdir;
+
+    fn make_state() -> (Arc<AppState>, tempfile::TempDir) {
+        let graph = Graph {
+            version: "0.1.0".to_string(),
+            nodes: vec![
+                Node {
+                    id: "app::main".into(),
+                    kind: NodeKind::Function,
+                    name: "main".into(),
+                    file: "src/main.rs".into(),
+                    span: Span {
+                        start: [1, 0],
+                        end: [3, 1],
+                    },
+                    visibility: Visibility::Public,
+                    metadata: HashMap::new(),
+                    role: Some(NodeRole::EntryPoint),
+                    signature: Some("fn main()".into()),
+                    doc_comment: None,
+                    module: Some("App".into()),
+                    snippet: Some("fn main() { helper(); }".into()),
+                },
+                Node {
+                    id: "app::helper".into(),
+                    kind: NodeKind::Function,
+                    name: "helper".into(),
+                    file: "src/lib.rs".into(),
+                    span: Span {
+                        start: [5, 0],
+                        end: [5, 12],
+                    },
+                    visibility: Visibility::Private,
+                    metadata: HashMap::new(),
+                    role: None,
+                    signature: Some("fn helper()".into()),
+                    doc_comment: None,
+                    module: Some("Core".into()),
+                    snippet: Some("fn helper() {}".into()),
+                },
+            ],
+            edges: vec![Edge {
+                source: "app::main".into(),
+                target: "app::helper".into(),
+                kind: EdgeKind::Calls,
+                confidence: 1.0,
+                direction: None,
+                operation: None,
+                condition: None,
+                async_boundary: Some(false),
+                provenance: Vec::new(),
+            }],
+        };
+        let dir = tempdir().unwrap();
+        let index = search::build_index(&graph, dir.path()).unwrap();
+        (
+            Arc::new(AppState {
+                graph,
+                search_index: index,
+            }),
+            dir,
+        )
+    }
+
+    #[tokio::test]
+    async fn search_api_applies_filters_and_context() {
+        let (state, _dir) = make_state();
+        let response = get_search(
+            State(state),
+            Query(SearchParams {
+                q: "main".into(),
+                limit: 10,
+                kind: Some("function".into()),
+                module: Some("App".into()),
+                file: Some("main.rs".into()),
+                role: Some("entry_point".into()),
+                fuzzy: false,
+                context: true,
+                fields: Some("id,signature,role,snippet".into()),
+            }),
+        )
+        .await;
+
+        assert_eq!(response.0["total"], 1);
+        let result = &response.0["results"][0];
+        assert_eq!(result["name"], "main");
+        assert_eq!(result["id"], "app::main");
+        assert_eq!(result["signature"], "fn main()");
+        assert_eq!(result["role"], "entry_point");
+        assert_eq!(result["snippet"], "fn main() { helper(); }");
+        assert!(result.get("file").is_none());
+        assert_eq!(result["calls"][0], "app::helper");
+    }
 }

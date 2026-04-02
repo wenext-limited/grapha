@@ -9,6 +9,7 @@ use tantivy::schema::{IndexRecordOption, STORED, STRING, Schema, TEXT, Value};
 use tantivy::{Index, IndexWriter, ReloadPolicy, TantivyDocument, Term, doc};
 
 use crate::delta::{EntitySyncStats, GraphDelta, SyncMode};
+use crate::fields::FieldSet;
 use grapha_core::graph::{EdgeKind, Graph};
 use grapha_core::graph::{Node, NodeRole};
 
@@ -402,12 +403,27 @@ pub fn search_filtered(
     Ok(results)
 }
 
-#[derive(Debug, Serialize)]
-pub struct EnrichedSearchResult {
-    #[serde(flatten)]
-    pub base: SearchResult,
+#[derive(Debug, Clone, Serialize)]
+pub struct SearchOutputResult {
+    pub name: String,
+    pub kind: String,
+    pub score: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub module: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub span: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub snippet: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub visibility: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub calls: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -416,40 +432,156 @@ pub struct EnrichedSearchResult {
     pub type_refs: Vec<String>,
 }
 
-pub fn enrich_with_context(results: &[SearchResult], graph: &Graph) -> Vec<EnrichedSearchResult> {
+struct GraphSearchDetails<'a> {
+    node: &'a Node,
+    calls: Vec<String>,
+    called_by: Vec<String>,
+    type_refs: Vec<String>,
+}
+
+fn visibility_to_string(node: &Node) -> String {
+    serde_json::to_string(&node.visibility)
+        .unwrap_or_else(|_| format!("{:?}", node.visibility))
+        .trim_matches('"')
+        .to_string()
+}
+
+fn role_value(role: &Option<NodeRole>) -> Option<String> {
+    role.as_ref().map(|role| match role {
+        NodeRole::EntryPoint => "entry_point".to_string(),
+        NodeRole::Terminal { .. } => "terminal".to_string(),
+        NodeRole::Internal => "internal".to_string(),
+    })
+}
+
+fn node_span_string(node: &Node) -> String {
+    format!(
+        "{}:{}-{}:{}",
+        node.span.start[0], node.span.start[1], node.span.end[0], node.span.end[1]
+    )
+}
+
+fn collect_graph_details<'a>(
+    results: &[SearchResult],
+    graph: &'a Graph,
+) -> Vec<Option<GraphSearchDetails<'a>>> {
     results
         .iter()
-        .map(|r| {
-            let node = graph.nodes.iter().find(|n| n.id == r.id);
-            let snippet = node.and_then(|n| n.snippet.clone());
-
-            let calls: Vec<String> = graph
+        .map(|result| {
+            let node = graph.nodes.iter().find(|node| node.id == result.id)?;
+            let calls = graph
                 .edges
                 .iter()
-                .filter(|e| e.source == r.id && e.kind == EdgeKind::Calls)
+                .filter(|e| e.source == result.id && e.kind == EdgeKind::Calls)
                 .map(|e| e.target.clone())
                 .collect();
-
-            let called_by: Vec<String> = graph
+            let called_by = graph
                 .edges
                 .iter()
-                .filter(|e| e.target == r.id && e.kind == EdgeKind::Calls)
+                .filter(|e| e.target == result.id && e.kind == EdgeKind::Calls)
                 .map(|e| e.source.clone())
                 .collect();
-
-            let type_refs: Vec<String> = graph
+            let type_refs = graph
                 .edges
                 .iter()
-                .filter(|e| e.source == r.id && e.kind == EdgeKind::TypeRef)
+                .filter(|e| e.source == result.id && e.kind == EdgeKind::TypeRef)
                 .map(|e| e.target.clone())
                 .collect();
-
-            EnrichedSearchResult {
-                base: r.clone(),
-                snippet,
+            Some(GraphSearchDetails {
+                node,
                 calls,
                 called_by,
                 type_refs,
+            })
+        })
+        .collect()
+}
+
+pub fn needs_graph_for_projection(fields: FieldSet, include_context: bool) -> bool {
+    include_context
+        || fields.span
+        || fields.snippet
+        || fields.visibility
+        || fields.signature
+        || fields.role
+}
+
+pub fn project_results(
+    results: &[SearchResult],
+    graph: Option<&Graph>,
+    fields: FieldSet,
+    include_context: bool,
+) -> Vec<SearchOutputResult> {
+    let graph_details = graph.map(|graph| collect_graph_details(results, graph));
+
+    results
+        .iter()
+        .enumerate()
+        .map(|(index, result)| {
+            let details = graph_details
+                .as_ref()
+                .and_then(|details| details.get(index))
+                .and_then(|details| details.as_ref());
+            let role = if fields.role {
+                details
+                    .map(|details| role_value(&details.node.role))
+                    .unwrap_or_else(|| result.role.clone())
+            } else {
+                None
+            };
+            SearchOutputResult {
+                name: result.name.clone(),
+                kind: result.kind.clone(),
+                score: result.score,
+                file: fields.file.then(|| result.file.clone()),
+                id: fields.id.then(|| result.id.clone()),
+                module: if fields.module {
+                    result.module.clone()
+                } else {
+                    None
+                },
+                span: if fields.span {
+                    details.map(|details| node_span_string(details.node))
+                } else {
+                    None
+                },
+                snippet: if fields.snippet {
+                    details.and_then(|details| details.node.snippet.clone())
+                } else {
+                    None
+                },
+                visibility: if fields.visibility {
+                    details.map(|details| visibility_to_string(details.node))
+                } else {
+                    None
+                },
+                signature: if fields.signature {
+                    details.and_then(|details| details.node.signature.clone())
+                } else {
+                    None
+                },
+                role,
+                calls: if include_context {
+                    details
+                        .map(|details| details.calls.clone())
+                        .unwrap_or_default()
+                } else {
+                    Vec::new()
+                },
+                called_by: if include_context {
+                    details
+                        .map(|details| details.called_by.clone())
+                        .unwrap_or_default()
+                } else {
+                    Vec::new()
+                },
+                type_refs: if include_context {
+                    details
+                        .map(|details| details.type_refs.clone())
+                        .unwrap_or_default()
+                } else {
+                    Vec::new()
+                },
             }
         })
         .collect()
@@ -799,5 +931,87 @@ mod tests {
         };
         let results = search_filtered(&index, "AppView", 10, &options).unwrap();
         assert!(results.is_empty());
+    }
+
+    #[test]
+    fn projection_respects_fields_and_context() {
+        let graph = Graph {
+            version: "0.1.0".to_string(),
+            nodes: vec![
+                Node {
+                    id: "app::main".into(),
+                    kind: NodeKind::Function,
+                    name: "main".into(),
+                    file: "src/main.rs".into(),
+                    span: Span {
+                        start: [1, 0],
+                        end: [3, 1],
+                    },
+                    visibility: Visibility::Public,
+                    metadata: HashMap::new(),
+                    role: Some(NodeRole::EntryPoint),
+                    signature: Some("fn main()".into()),
+                    doc_comment: None,
+                    module: Some("App".into()),
+                    snippet: Some("fn main() { helper(); }".into()),
+                },
+                Node {
+                    id: "app::helper".into(),
+                    kind: NodeKind::Function,
+                    name: "helper".into(),
+                    file: "src/main.rs".into(),
+                    span: Span {
+                        start: [5, 0],
+                        end: [5, 12],
+                    },
+                    visibility: Visibility::Private,
+                    metadata: HashMap::new(),
+                    role: None,
+                    signature: Some("fn helper()".into()),
+                    doc_comment: None,
+                    module: Some("App".into()),
+                    snippet: Some("fn helper() {}".into()),
+                },
+            ],
+            edges: vec![Edge {
+                source: "app::main".into(),
+                target: "app::helper".into(),
+                kind: EdgeKind::Calls,
+                confidence: 1.0,
+                direction: None,
+                operation: None,
+                condition: None,
+                async_boundary: Some(false),
+                provenance: Vec::new(),
+            }],
+        };
+        let results = vec![SearchResult {
+            id: "app::main".into(),
+            name: "main".into(),
+            kind: "function".into(),
+            file: "src/main.rs".into(),
+            score: 1.0,
+            module: Some("App".into()),
+            role: Some("entry_point".into()),
+        }];
+
+        let projected = project_results(
+            &results,
+            Some(&graph),
+            FieldSet::parse("id,signature,role,snippet"),
+            true,
+        );
+
+        assert_eq!(projected.len(), 1);
+        let result = &projected[0];
+        assert_eq!(result.name, "main");
+        assert_eq!(result.kind, "function");
+        assert_eq!(result.id.as_deref(), Some("app::main"));
+        assert_eq!(result.signature.as_deref(), Some("fn main()"));
+        assert_eq!(result.role.as_deref(), Some("entry_point"));
+        assert_eq!(result.snippet.as_deref(), Some("fn main() { helper(); }"));
+        assert!(result.file.is_none());
+        assert_eq!(result.calls, vec!["app::helper".to_string()]);
+        assert!(result.called_by.is_empty());
     }
 }

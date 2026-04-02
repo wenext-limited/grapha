@@ -783,6 +783,96 @@ fn context_command_returns_symbol_info() {
 }
 
 #[test]
+fn search_fields_projection_works() {
+    let dir = tempfile::tempdir().unwrap();
+    let store_dir = dir.path().join(".grapha");
+    std::fs::write(
+        dir.path().join("main.rs"),
+        "fn main() { helper(); }\nfn helper() {}\n",
+    )
+    .unwrap();
+
+    grapha()
+        .args([
+            "index",
+            dir.path().to_str().unwrap(),
+            "--store-dir",
+            store_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let output = grapha()
+        .args([
+            "symbol",
+            "search",
+            "main",
+            "-p",
+            dir.path().to_str().unwrap(),
+            "--fields",
+            "id,signature,role",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let parsed: Value = serde_json::from_slice(&output).unwrap();
+    let first = &parsed[0];
+    assert_eq!(first["name"], "main");
+    assert_eq!(first["kind"], "function");
+    assert_eq!(first["id"], "main.rs::main");
+    assert_eq!(first["signature"], "fn main()");
+    assert_eq!(first["role"], "entry_point");
+    assert!(first.get("file").is_none());
+}
+
+#[test]
+fn search_context_projection_keeps_relationships() {
+    let dir = tempfile::tempdir().unwrap();
+    let store_dir = dir.path().join(".grapha");
+    std::fs::write(
+        dir.path().join("main.rs"),
+        "fn main() { helper(); }\nfn helper() {}\n",
+    )
+    .unwrap();
+
+    grapha()
+        .args([
+            "index",
+            dir.path().to_str().unwrap(),
+            "--store-dir",
+            store_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let output = grapha()
+        .args([
+            "symbol",
+            "search",
+            "main",
+            "-p",
+            dir.path().to_str().unwrap(),
+            "--context",
+            "--fields",
+            "snippet",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let parsed: Value = serde_json::from_slice(&output).unwrap();
+    let first = &parsed[0];
+    assert_eq!(first["name"], "main");
+    assert!(first["snippet"].as_str().unwrap().contains("helper"));
+    assert_eq!(first["calls"][0], "main.rs::helper");
+}
+
+#[test]
 fn changes_command_runs_on_clean_repo() {
     let dir = tempfile::tempdir().unwrap();
     let store_dir = dir.path().join(".grapha");

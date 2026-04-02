@@ -59,7 +59,11 @@ impl<'a> LineIndex<'a> {
         let snippet = String::from_utf8_lossy(slice)
             .trim_end_matches(['\n', '\r'])
             .to_string();
-        if snippet.is_empty() { None } else { Some(snippet) }
+        if snippet.is_empty() {
+            None
+        } else {
+            Some(snippet)
+        }
     }
 
     fn extract_full_lines_with_base(&self, span: &Span, one_based_lines: bool) -> Option<String> {
