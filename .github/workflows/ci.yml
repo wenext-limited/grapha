@@ -23,6 +23,11 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
+      - name: Set up Swift
+        uses: swift-actions/setup-swift@v3
+        with:
+          swift-version: "6.3"
+
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -33,6 +38,7 @@ jobs:
 
       - name: Show toolchain versions
         run: |
+          swift --version
           rustc --version
           cargo --version
 
@@ -55,6 +61,11 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+
+      - name: Set up Swift
+        uses: swift-actions/setup-swift@v3
+        with:
+          swift-version: "6.3"
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
