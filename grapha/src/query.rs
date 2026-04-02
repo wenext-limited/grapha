@@ -9,6 +9,7 @@ pub(crate) mod l10n;
 pub mod localize;
 pub mod map;
 pub mod module_summary;
+pub mod origin;
 pub mod reverse;
 pub mod smells;
 pub mod trace;

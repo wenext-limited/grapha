@@ -135,6 +135,57 @@ fn reverse_trace_respects_depth_limit() {
 }
 
 #[test]
+fn origin_command_reports_api_and_field_candidates() {
+    let dir = tempfile::tempdir().unwrap();
+    let store_dir = dir.path().join(".grapha");
+    std::fs::write(
+        dir.path().join("main.rs"),
+        r#"
+        fn fetch_profile() { helper(); }
+        fn helper() {}
+        fn display_name() { fetch_profile(); }
+        fn title_text() { display_name(); }
+        "#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("grapha.toml"),
+        r#"
+        [[classifiers]]
+        regex = "fetch_profile"
+        terminal = "network"
+        direction = "read"
+        operation = "fetch"
+        "#,
+    )
+    .unwrap();
+
+    grapha()
+        .args([
+            "index",
+            dir.path().to_str().unwrap(),
+            "--store-dir",
+            store_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    grapha()
+        .args([
+            "flow",
+            "origin",
+            "title_text",
+            "-p",
+            dir.path().to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"total_origins\""))
+        .stdout(predicate::str::contains("\"origins\""))
+        .stdout(predicate::str::contains("title_text"));
+}
+
+#[test]
 fn impact_command_defaults_to_json() {
     let dir = index_temp_project("fn main() { helper(); }\nfn helper() {}\n");
 

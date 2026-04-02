@@ -7,8 +7,8 @@ use crate::query::{
     ContextResult, SymbolInfo, SymbolRef, SymbolTreeRef, dataflow::DataflowEdge,
     dataflow::DataflowEdgeKind, dataflow::DataflowNode, dataflow::DataflowNodeKind,
     dataflow::DataflowResult, entries::EntriesResult, impact::ImpactResult, impact::ImpactTreeNode,
-    localize::LocalizeResult, reverse::AffectedEntry, reverse::ReverseResult, trace::Flow,
-    trace::TraceResult, usages::UsagesResult,
+    localize::LocalizeResult, origin::OriginPath, origin::OriginResult, reverse::AffectedEntry,
+    reverse::ReverseResult, trace::Flow, trace::TraceResult, usages::UsagesResult,
 };
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -1046,6 +1046,70 @@ pub fn render_reverse_with_options(result: &ReverseResult, options: RenderOption
     );
 
     render_tree(&root)
+}
+
+fn origin_leaf_label(origin: &OriginPath, options: RenderOptions) -> String {
+    let palette = Palette::new(options);
+    format!(
+        "{} {}",
+        format_symbol_ref(&origin.api, options),
+        palette.tag(format!(
+            "[{} {:.2}]",
+            origin.terminal_kind, origin.confidence
+        ))
+    )
+}
+
+pub fn render_origin_with_options(result: &OriginResult, options: RenderOptions) -> String {
+    let mut children = vec![
+        TreeNode::leaf(format_summary(
+            &[("origins", result.total_origins.to_string())],
+            options,
+        )),
+        TreeNode::branch(
+            format_section_count("origins", result.total_origins, options),
+            result
+                .origins
+                .iter()
+                .map(|origin| {
+                    let mut item_children = Vec::new();
+                    if !origin.path.is_empty() {
+                        item_children.push(TreeNode::leaf(format_key_value(
+                            "path",
+                            &origin.path.join(" <- "),
+                            options,
+                        )));
+                    }
+                    if !origin.field_candidates.is_empty() {
+                        item_children.push(TreeNode::leaf(format_key_value(
+                            "field_candidates",
+                            &origin.field_candidates.join(", "),
+                            options,
+                        )));
+                    }
+                    item_children.extend(
+                        origin
+                            .notes
+                            .iter()
+                            .map(|note| TreeNode::leaf(format_key_value("note", note, options))),
+                    );
+                    TreeNode::branch(origin_leaf_label(origin, options), item_children)
+                })
+                .collect(),
+        ),
+    ];
+    if result.total_origins == 0 {
+        children.push(TreeNode::leaf(format_key_value(
+            "hint",
+            "no upstream network terminal found from current graph edges",
+            options,
+        )));
+    }
+
+    render_tree(&TreeNode::branch(
+        format_symbol_ref(&result.target_ref, options),
+        children,
+    ))
 }
 
 pub fn render_impact_with_options(result: &ImpactResult, options: RenderOptions) -> String {

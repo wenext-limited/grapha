@@ -254,6 +254,20 @@ enum FlowCommands {
         #[arg(long, value_enum, default_value_t = QueryOutputFormat::Json)]
         format: QueryOutputFormat,
     },
+    /// Trace backward to likely API/data origins for a UI symbol
+    Origin {
+        /// Symbol name or ID
+        symbol: String,
+        /// Maximum traversal depth
+        #[arg(long, default_value = "10")]
+        depth: usize,
+        /// Project directory
+        #[arg(short, long, default_value = ".")]
+        path: PathBuf,
+        /// Output format
+        #[arg(long, value_enum, default_value_t = QueryOutputFormat::Json)]
+        format: QueryOutputFormat,
+    },
     /// List auto-detected entry points
     Entries {
         /// Project directory
@@ -1139,6 +1153,19 @@ fn handle_flow_command(
             "symbol",
             |graph| query::dataflow::query_dataflow(graph, &symbol, depth),
             render::render_dataflow_with_options,
+        ),
+        FlowCommands::Origin {
+            symbol,
+            depth,
+            path,
+            format,
+        } => handle_resolved_graph_query(
+            &path,
+            format,
+            render_options,
+            "symbol",
+            |graph| query::origin::query_origin(graph, &symbol, depth),
+            render::render_origin_with_options,
         ),
         FlowCommands::Entries { path, format } => handle_graph_query(
             &path,
