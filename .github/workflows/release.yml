@@ -1,0 +1,59 @@
+name: Release
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    name: Package ${{ matrix.asset_suffix }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-13
+            asset_suffix: macos-x86_64
+          - runner: macos-15
+            asset_suffix: macos-arm64
+    env:
+      GRAPHA_SWIFT_BRIDGE_MODE: required
+      CARGO_TERM_COLOR: always
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Swift
+        uses: swift-actions/setup-swift@v3
+        with:
+          swift-version: "6.3"
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Show toolchain versions
+        run: |
+          uname -m
+          swift --version
+          rustc --version
+          cargo --version
+
+      - name: Build release binary
+        run: cargo build -p grapha --release
+
+      - name: Package release archive
+        run: bash .github/scripts/package-release.sh "${{ github.event.release.tag_name }}" "${{ matrix.asset_suffix }}"
+
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/grapha-${{ github.event.release.tag_name }}-${{ matrix.asset_suffix }}.tar.gz
+            dist/grapha-${{ github.event.release.tag_name }}-${{ matrix.asset_suffix }}.sha256

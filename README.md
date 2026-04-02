@@ -42,7 +42,7 @@ Benchmarked on a production iOS app (1,991 Swift files, ~300K lines):
 ## Install
 
 ```bash
-cargo install --path grapha
+cargo install grapha
 ```
 
 ## Quick Start

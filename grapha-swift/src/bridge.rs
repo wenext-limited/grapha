@@ -48,6 +48,10 @@ pub struct SwiftBridge {
 
 #[cfg(not(no_swift_bridge))]
 static BRIDGE: OnceLock<Option<SwiftBridge>> = OnceLock::new();
+#[cfg(not(no_swift_bridge))]
+const BRIDGE_DYLIB_NAME: &str = "libGraphaSwiftBridge.dylib";
+#[cfg(not(no_swift_bridge))]
+const RUNTIME_BRIDGE_PATH_ENV: &str = "GRAPHA_SWIFT_BRIDGE_PATH";
 
 impl SwiftBridge {
     #[cfg(not(no_swift_bridge))]
@@ -85,13 +89,71 @@ impl SwiftBridge {
 
     #[cfg(not(no_swift_bridge))]
     fn find_dylib() -> Option<PathBuf> {
-        if let Some(dir) = option_env!("SWIFT_BRIDGE_PATH") {
-            let dylib = Path::new(dir).join("libGraphaSwiftBridge.dylib");
-            if dylib.exists() {
-                return Some(dylib);
-            }
+        let runtime_override = std::env::var_os(RUNTIME_BRIDGE_PATH_ENV).map(PathBuf::from);
+        let current_exe = std::env::current_exe().ok();
+        let build_dir = option_env!("SWIFT_BRIDGE_PATH").map(PathBuf::from);
+
+        resolve_existing_dylib(
+            runtime_override.as_deref(),
+            current_exe.as_deref(),
+            build_dir.as_deref(),
+        )
+    }
+}
+
+#[cfg(not(no_swift_bridge))]
+fn resolve_existing_dylib(
+    runtime_override: Option<&Path>,
+    current_exe: Option<&Path>,
+    build_dir: Option<&Path>,
+) -> Option<PathBuf> {
+    dylib_candidates(runtime_override, current_exe, build_dir)
+        .into_iter()
+        .find(|path| path.exists())
+}
+
+#[cfg(not(no_swift_bridge))]
+fn dylib_candidates(
+    runtime_override: Option<&Path>,
+    current_exe: Option<&Path>,
+    build_dir: Option<&Path>,
+) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+
+    let mut push_unique = |path: PathBuf| {
+        if !candidates.iter().any(|existing| existing == &path) {
+            candidates.push(path);
         }
-        None
+    };
+
+    if let Some(path) = runtime_override {
+        push_unique(normalize_dylib_candidate(path));
+    }
+
+    if let Some(executable_path) = current_exe
+        && let Some(executable_dir) = executable_path.parent()
+    {
+        push_unique(executable_dir.join(BRIDGE_DYLIB_NAME));
+        push_unique(executable_dir.join("lib").join(BRIDGE_DYLIB_NAME));
+    }
+
+    if let Some(path) = build_dir {
+        push_unique(normalize_dylib_candidate(path));
+    }
+
+    candidates
+}
+
+#[cfg(not(no_swift_bridge))]
+fn normalize_dylib_candidate(path: &Path) -> PathBuf {
+    if path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name == BRIDGE_DYLIB_NAME)
+    {
+        path.to_path_buf()
+    } else {
+        path.join(BRIDGE_DYLIB_NAME)
     }
 }
 
