@@ -319,7 +319,7 @@ fn choose_preferred_origin<'a>(
     current: &'a OriginPath,
     candidate: &'a OriginPath,
 ) -> &'a OriginPath {
-    origin_specificity_rank(candidate)
+    let candidate_ordering = origin_specificity_rank(candidate)
         .cmp(&origin_specificity_rank(current))
         .then_with(|| {
             candidate
@@ -327,10 +327,13 @@ fn choose_preferred_origin<'a>(
                 .partial_cmp(&current.confidence)
                 .unwrap_or(std::cmp::Ordering::Equal)
         })
-        .then_with(|| current.api.name.cmp(&candidate.api.name).reverse())
-        .is_gt()
-        .then_some(candidate)
-        .unwrap_or(current)
+        .then_with(|| current.api.name.cmp(&candidate.api.name).reverse());
+
+    if candidate_ordering.is_gt() {
+        candidate
+    } else {
+        current
+    }
 }
 
 fn merge_equivalent_origins(origins: Vec<OriginPath>) -> Vec<OriginPath> {
@@ -641,14 +644,13 @@ fn notes_for(
         .iter()
         .rev()
         .find(|node| is_origin_terminal(node))
+        && let Some(kind) = terminal_kind(terminal_node)
     {
-        if let Some(kind) = terminal_kind(terminal_node) {
-            notes.push(format!(
-                "reached {} terminal {}",
-                terminal_kind_to_string(&kind),
-                terminal_node.name
-            ));
-        }
+        notes.push(format!(
+            "reached {} terminal {}",
+            terminal_kind_to_string(&kind),
+            terminal_node.name
+        ));
     }
     if let Some(candidate) = field_candidates.first() {
         notes.push(format!("candidate field path {}", candidate));

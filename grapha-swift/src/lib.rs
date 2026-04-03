@@ -344,6 +344,7 @@ fn source_contains_l10n_markers(source: &[u8]) -> bool {
         || bytes_contains(source, b"NSLocalizedString")
         || bytes_contains(source, b"LocalizedStringKey")
         || bytes_contains(source, b"Text(\"")
+        || bytes_contains(source, b"Text(.")
         || bytes_contains(source, b"Localizable")
 }
 
@@ -800,6 +801,9 @@ mod marker_tests {
     #[test]
     fn localization_and_asset_markers_still_match_common_cases() {
         assert!(source_contains_l10n_markers(br#"Text("hello")"#));
+        assert!(source_contains_l10n_markers(
+            br#"Text(.accountForgetPassword)"#
+        ));
         assert!(source_contains_l10n_markers(
             br#"NSLocalizedString("hello", comment: "")"#
         ));
