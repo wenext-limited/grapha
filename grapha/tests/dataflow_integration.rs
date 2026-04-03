@@ -186,6 +186,195 @@ fn origin_command_reports_api_and_field_candidates() {
 }
 
 #[test]
+fn origin_command_resolves_typealias_service_endpoint_without_registration() {
+    let dir = tempfile::tempdir().unwrap();
+    let store_dir = dir.path().join(".grapha");
+    std::fs::write(
+        dir.path().join("AppContext.swift"),
+        r#"
+        protocol UserAPI {
+            func _getUser(id: Int, attrs: [String]) async throws -> String
+        }
+
+        protocol ServiceEventProtocol {}
+        typealias ProfileAPI = UserAPI & ServiceEventProtocol
+        typealias PublicProfileAPI = ProfileAPI
+
+        struct AppContext {
+            static let profile: any PublicProfileAPI = ProfileService()
+        }
+
+        extension UserAPI {
+            func fetchUserInfo(id: Int) async throws -> String {
+                try await _getUser(id: id, attrs: ["profile"])
+            }
+        }
+        "#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("ProfileModule.swift"),
+        r#"
+        struct ProfileService {}
+
+        extension ProfileService: PublicProfileAPI {
+            func _getUser(id: Int, attrs: [String]) async throws -> String {
+                try await requestGetUser(id, attrs: attrs)
+            }
+
+            func requestGetUser(_ id: Int, attrs: [String]) async throws -> String {
+                try await request("user/getUserInfoByUid/\(id)", data: ["attrs": attrs])
+            }
+        }
+
+        func request(_ endpoint: String, data: [String: [String]]) async throws -> String {
+            endpoint
+        }
+        "#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("ProfilePageViewModel.swift"),
+        r#"
+        struct ProfilePageViewModel {
+            var homeEffect: String = ""
+
+            func refreshUserInfo() async throws {
+                let _ = try await AppContext.profile.fetchUserInfo(id: 1)
+            }
+
+            func handleUserInfoUpdate(_ userInfo: String) {
+                _ = userInfo
+                _ = homeEffect
+            }
+        }
+        "#,
+    )
+    .unwrap();
+
+    grapha()
+        .args([
+            "index",
+            dir.path().to_str().unwrap(),
+            "--store-dir",
+            store_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    grapha()
+        .args([
+            "flow",
+            "origin",
+            "fetchUserInfo",
+            "-p",
+            dir.path().to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("requestGetUser"))
+        .stdout(predicate::str::contains("user/getUserInfoByUid"))
+        .stdout(predicate::str::contains("\"code_snippets\"").not())
+        .stdout(predicate::str::contains("\"request_keys\""));
+
+    grapha()
+        .args([
+            "flow",
+            "origin",
+            "fetchUserInfo",
+            "-p",
+            dir.path().to_str().unwrap(),
+            "--fields",
+            "snippet",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"code_snippets\""))
+        .stdout(predicate::str::contains("\"reason\": \"request_leaf\""))
+        .stdout(predicate::str::contains("\"request_keys\""));
+}
+
+#[test]
+fn origin_command_accepts_network_terminal_filter() {
+    let dir = tempfile::tempdir().unwrap();
+    let store_dir = dir.path().join(".grapha");
+    std::fs::write(
+        dir.path().join("AppContext.swift"),
+        r#"
+        protocol UserAPI {
+            func _getUser(id: Int, attrs: [String]) async throws -> String
+        }
+
+        protocol ServiceEventProtocol {}
+        typealias ProfileAPI = UserAPI & ServiceEventProtocol
+        typealias PublicProfileAPI = ProfileAPI
+
+        struct AppContext {
+            static let profile: any PublicProfileAPI = ProfileService()
+        }
+
+        extension UserAPI {
+            func fetchUserInfo(id: Int) async throws -> String {
+                try await _getUser(id: id, attrs: ["profile"])
+            }
+        }
+        "#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("ProfileModule.swift"),
+        r#"
+        struct ProfileService {}
+
+        extension ProfileService: PublicProfileAPI {
+            func _getUser(id: Int, attrs: [String]) async throws -> String {
+                try await requestGetUser(id, attrs: attrs)
+            }
+
+            func requestGetUser(_ id: Int, attrs: [String]) async throws -> String {
+                try await request("user/getUserInfoByUid/\(id)", data: ["attrs": attrs])
+            }
+        }
+
+        func request(_ endpoint: String, data: [String: [String]]) async throws -> String {
+            endpoint
+        }
+        "#,
+    )
+    .unwrap();
+
+    grapha()
+        .args([
+            "index",
+            dir.path().to_str().unwrap(),
+            "--store-dir",
+            store_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    grapha()
+        .args([
+            "flow",
+            "origin",
+            "fetchUserInfo",
+            "-p",
+            dir.path().to_str().unwrap(),
+            "--terminal-kind",
+            "network",
+            "--fields",
+            "snippet",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"total_origins\": 1"))
+        .stdout(predicate::str::contains("\"terminal_kind\": \"network\""))
+        .stdout(predicate::str::contains("requestGetUser"))
+        .stdout(predicate::str::contains("\"code_snippets\""))
+        .stdout(predicate::str::contains("user/getUserInfoByUid"));
+}
+
+#[test]
 fn impact_command_defaults_to_json() {
     let dir = index_temp_project("fn main() { helper(); }\nfn helper() {}\n");
 

@@ -233,6 +233,100 @@ fn index_json_format() {
 }
 
 #[test]
+fn symbol_search_includes_id_by_default() {
+    let dir = tempfile::tempdir().unwrap();
+    let store_dir = dir.path().join(".grapha");
+    std::fs::write(
+        dir.path().join("main.rs"),
+        r#"
+        fn helper() {}
+        fn run() { helper(); }
+        "#,
+    )
+    .unwrap();
+
+    grapha()
+        .args([
+            "index",
+            dir.path().to_str().unwrap(),
+            "--store-dir",
+            store_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let output = grapha()
+        .args([
+            "symbol",
+            "search",
+            "helper",
+            "-p",
+            dir.path().to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let parsed: Value = serde_json::from_slice(&output).unwrap();
+    let first = parsed.as_array().unwrap().first().unwrap();
+    assert_eq!(first["name"], "helper");
+    assert!(
+        first.get("id").is_some(),
+        "default search output should include id"
+    );
+}
+
+#[test]
+fn flow_entries_tree_respects_file_field_toggle() {
+    let dir = tempfile::tempdir().unwrap();
+    let store_dir = dir.path().join(".grapha");
+    std::fs::write(
+        dir.path().join("main.rs"),
+        r#"
+        fn helper() {}
+        fn main() { helper(); }
+        "#,
+    )
+    .unwrap();
+
+    grapha()
+        .args([
+            "index",
+            dir.path().to_str().unwrap(),
+            "--store-dir",
+            store_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    grapha()
+        .args([
+            "flow",
+            "entries",
+            "-p",
+            dir.path().to_str().unwrap(),
+            "--format",
+            "tree",
+            "--fields",
+            "none",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("main [function]"))
+        .stdout(predicate::str::contains("(main.rs)").not());
+}
+
+#[test]
+fn flow_origin_help_mentions_full_field_alias() {
+    grapha()
+        .args(["flow", "origin", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"full\"/\"all\"/\"none\""));
+}
+
+#[test]
 fn index_skips_invalid_xcstrings_catalogs() {
     let dir = tempfile::tempdir().unwrap();
     let store_dir = dir.path().join(".grapha");

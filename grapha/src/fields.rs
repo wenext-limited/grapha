@@ -30,6 +30,11 @@ impl Default for FieldSet {
 }
 
 impl FieldSet {
+    pub fn with_id(mut self) -> Self {
+        self.id = true;
+        self
+    }
+
     pub fn all() -> Self {
         Self {
             file: true,
@@ -58,7 +63,7 @@ impl FieldSet {
 
     pub fn parse(input: &str) -> Self {
         match input.trim() {
-            "all" => Self::all(),
+            "all" | "full" => Self::all(),
             "none" => Self::none(),
             s => {
                 let mut fs = Self::none();

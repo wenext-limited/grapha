@@ -62,6 +62,29 @@ enum TraceDirection {
     Reverse,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum OriginTerminalFilter {
+    Network,
+    Persistence,
+    Cache,
+    Event,
+    Keychain,
+    Search,
+}
+
+impl OriginTerminalFilter {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Network => "network",
+            Self::Persistence => "persistence",
+            Self::Cache => "cache",
+            Self::Event => "event",
+            Self::Keychain => "keychain",
+            Self::Search => "search",
+        }
+    }
+}
+
 #[derive(Subcommand)]
 enum Commands {
     /// Analyze source files and output graph
@@ -168,7 +191,7 @@ enum SymbolCommands {
         /// Include source snippet and relationships in results
         #[arg(long)]
         context: bool,
-        /// Fields to display (comma-separated: file,id,module,span,snippet,visibility,signature,role; or "all"/"none")
+        /// Fields to display (comma-separated: file,id,module,span,snippet,visibility,signature,role; or "full"/"all"/"none")
         #[arg(long)]
         fields: Option<String>,
     },
@@ -182,7 +205,7 @@ enum SymbolCommands {
         /// Output format
         #[arg(long, value_enum, default_value_t = QueryOutputFormat::Json)]
         format: QueryOutputFormat,
-        /// Fields to display (comma-separated: file,id,module,span,snippet,visibility,signature,role; or "all"/"none")
+        /// Fields to display (comma-separated: file,id,module,span,snippet,visibility,signature,role; or "full"/"all"/"none")
         #[arg(long)]
         fields: Option<String>,
     },
@@ -199,7 +222,7 @@ enum SymbolCommands {
         /// Output format
         #[arg(long, value_enum, default_value_t = QueryOutputFormat::Json)]
         format: QueryOutputFormat,
-        /// Fields to display (comma-separated: file,id,module,span,snippet,visibility,signature,role; or "all"/"none")
+        /// Fields to display (comma-separated: file,id,module,span,snippet,visibility,signature,role; or "full"/"all"/"none")
         #[arg(long)]
         fields: Option<String>,
     },
@@ -239,6 +262,9 @@ enum FlowCommands {
         /// Output format
         #[arg(long, value_enum, default_value_t = QueryOutputFormat::Json)]
         format: QueryOutputFormat,
+        /// Fields to display in tree output (comma-separated: file; or "full"/"all"/"none")
+        #[arg(long)]
+        fields: Option<String>,
     },
     /// Derive a semantic effect graph from a symbol
     Graph {
@@ -253,6 +279,9 @@ enum FlowCommands {
         /// Output format
         #[arg(long, value_enum, default_value_t = QueryOutputFormat::Json)]
         format: QueryOutputFormat,
+        /// Fields to display in tree output (comma-separated: file; or "full"/"all"/"none")
+        #[arg(long)]
+        fields: Option<String>,
     },
     /// Trace backward to likely API/data origins for a UI symbol
     Origin {
@@ -261,12 +290,18 @@ enum FlowCommands {
         /// Maximum traversal depth
         #[arg(long, default_value = "10")]
         depth: usize,
+        /// Keep only origins whose terminal kind matches
+        #[arg(long, value_enum)]
+        terminal_kind: Option<OriginTerminalFilter>,
         /// Project directory
         #[arg(short, long, default_value = ".")]
         path: PathBuf,
         /// Output format
         #[arg(long, value_enum, default_value_t = QueryOutputFormat::Json)]
         format: QueryOutputFormat,
+        /// Fields to display in output (comma-separated: file,snippet; or "full"/"all"/"none")
+        #[arg(long)]
+        fields: Option<String>,
     },
     /// List auto-detected entry points
     Entries {
@@ -276,6 +311,9 @@ enum FlowCommands {
         /// Output format
         #[arg(long, value_enum, default_value_t = QueryOutputFormat::Json)]
         format: QueryOutputFormat,
+        /// Fields to display in tree output (comma-separated: file; or "full"/"all"/"none")
+        #[arg(long)]
+        fields: Option<String>,
     },
 }
 
@@ -291,6 +329,9 @@ enum L10nCommands {
         /// Output format
         #[arg(long, value_enum, default_value_t = QueryOutputFormat::Json)]
         format: QueryOutputFormat,
+        /// Fields to display in tree output (comma-separated: file; or "full"/"all"/"none")
+        #[arg(long)]
+        fields: Option<String>,
     },
     /// Find SwiftUI usage sites for a localization key
     Usages {
@@ -305,6 +346,9 @@ enum L10nCommands {
         /// Output format
         #[arg(long, value_enum, default_value_t = QueryOutputFormat::Json)]
         format: QueryOutputFormat,
+        /// Fields to display in tree output (comma-separated: file; or "full"/"all"/"none")
+        #[arg(long)]
+        fields: Option<String>,
     },
 }
 
@@ -329,6 +373,9 @@ enum AssetCommands {
         /// Output format
         #[arg(long, value_enum, default_value_t = QueryOutputFormat::Json)]
         format: QueryOutputFormat,
+        /// Fields to display in tree output (comma-separated: file; or "full"/"all"/"none")
+        #[arg(long)]
+        fields: Option<String>,
     },
 }
 
@@ -529,7 +576,8 @@ fn run_pipeline(
                         let line_idx = snippet::LineIndex::new(&source_str);
                         for node in &mut result.nodes {
                             if snippet::should_extract_snippet(node.kind) {
-                                node.snippet = line_idx.extract_full_snippet(&node.span);
+                                node.snippet = line_idx
+                                    .extract_symbol_snippet(&node.span, &node.name, node.kind);
                             }
                         }
                     }
@@ -751,6 +799,13 @@ fn resolve_field_set(fields_flag: &Option<String>, path: &Path) -> fields::Field
                 fields::FieldSet::from_config(&cfg.output.default_fields)
             }
         }
+    }
+}
+
+fn resolve_search_field_set(fields_flag: &Option<String>, path: &Path) -> fields::FieldSet {
+    match fields_flag {
+        Some(_) => resolve_field_set(fields_flag, path),
+        None => resolve_field_set(fields_flag, path).with_id(),
     }
 }
 
@@ -1033,7 +1088,7 @@ fn handle_symbol_command(
             context,
             fields,
         } => {
-            let field_set = resolve_field_set(&fields, &path);
+            let field_set = resolve_search_field_set(&fields, &path);
             let index = open_search_index(&path)?;
             let options = search::SearchOptions {
                 kind,
@@ -1123,57 +1178,89 @@ fn handle_flow_command(
             depth,
             path,
             format,
+            fields,
         } => match direction {
-            TraceDirection::Forward => handle_resolved_graph_query(
-                &path,
-                format,
-                render_options,
-                "symbol",
-                |graph| query::trace::query_trace(graph, &symbol, depth.unwrap_or(10)),
-                render::render_trace_with_options,
-            ),
-            TraceDirection::Reverse => handle_resolved_graph_query(
-                &path,
-                format,
-                render_options,
-                "symbol",
-                |graph| query::reverse::query_reverse(graph, &symbol, depth),
-                render::render_reverse_with_options,
-            ),
+            TraceDirection::Forward => {
+                let render_options = render_options.with_fields(resolve_field_set(&fields, &path));
+                handle_resolved_graph_query(
+                    &path,
+                    format,
+                    render_options,
+                    "symbol",
+                    |graph| query::trace::query_trace(graph, &symbol, depth.unwrap_or(10)),
+                    render::render_trace_with_options,
+                )
+            }
+            TraceDirection::Reverse => {
+                let render_options = render_options.with_fields(resolve_field_set(&fields, &path));
+                handle_resolved_graph_query(
+                    &path,
+                    format,
+                    render_options,
+                    "symbol",
+                    |graph| query::reverse::query_reverse(graph, &symbol, depth),
+                    render::render_reverse_with_options,
+                )
+            }
         },
         FlowCommands::Graph {
             symbol,
             depth,
             path,
             format,
-        } => handle_resolved_graph_query(
-            &path,
-            format,
-            render_options,
-            "symbol",
-            |graph| query::dataflow::query_dataflow(graph, &symbol, depth),
-            render::render_dataflow_with_options,
-        ),
+            fields,
+        } => {
+            let render_options = render_options.with_fields(resolve_field_set(&fields, &path));
+            handle_resolved_graph_query(
+                &path,
+                format,
+                render_options,
+                "symbol",
+                |graph| query::dataflow::query_dataflow(graph, &symbol, depth),
+                render::render_dataflow_with_options,
+            )
+        }
         FlowCommands::Origin {
             symbol,
             depth,
+            terminal_kind,
             path,
             format,
-        } => handle_resolved_graph_query(
-            &path,
+            fields,
+        } => {
+            let field_set = resolve_field_set(&fields, &path);
+            let render_options = render_options.with_fields(field_set);
+            handle_resolved_graph_query(
+                &path,
+                format,
+                render_options,
+                "symbol",
+                |graph| {
+                    let result =
+                        query::origin::query_origin_with_path(graph, &symbol, depth, Some(&path))?;
+                    let result = query::origin::filter_origin_result_by_terminal_kind(
+                        result,
+                        terminal_kind.map(OriginTerminalFilter::as_str),
+                    );
+                    Ok(query::origin::project_origin_result(result, field_set))
+                },
+                render::render_origin_with_options,
+            )
+        }
+        FlowCommands::Entries {
+            path,
             format,
-            render_options,
-            "symbol",
-            |graph| query::origin::query_origin(graph, &symbol, depth),
-            render::render_origin_with_options,
-        ),
-        FlowCommands::Entries { path, format } => handle_graph_query(
-            &path,
-            format,
-            render_options,
-            query::entries::query_entries,
-            render::render_entries_with_options,
-        ),
+            fields,
+        } => {
+            let render_options = render_options.with_fields(resolve_field_set(&fields, &path));
+            handle_graph_query(
+                &path,
+                format,
+                render_options,
+                query::entries::query_entries,
+                render::render_entries_with_options,
+            )
+        }
     }
 }
 
@@ -1186,7 +1273,9 @@ fn handle_l10n_command(
             symbol,
             path,
             format,
+            fields,
         } => {
+            let render_options = render_options.with_fields(resolve_field_set(&fields, &path));
             let graph = load_graph(&path)?;
             let catalogs = localization::load_catalog_index(&path)?;
             let result = resolve_query_result(
@@ -1205,7 +1294,9 @@ fn handle_l10n_command(
             table,
             path,
             format,
+            fields,
         } => {
+            let render_options = render_options.with_fields(resolve_field_set(&fields, &path));
             let graph = load_graph(&path)?;
             let catalogs = localization::load_catalog_index(&path)?;
             let result = query::usages::query_usages(&graph, &catalogs, &key, table.as_deref());
@@ -1219,7 +1310,10 @@ fn handle_l10n_command(
     }
 }
 
-fn handle_asset_command(command: AssetCommands) -> anyhow::Result<()> {
+fn handle_asset_command(
+    command: AssetCommands,
+    render_options: render::RenderOptions,
+) -> anyhow::Result<()> {
     match command {
         AssetCommands::List { unused, path } => {
             if unused {
@@ -1233,7 +1327,13 @@ fn handle_asset_command(command: AssetCommands) -> anyhow::Result<()> {
                 print_json(&records)
             }
         }
-        AssetCommands::Usages { name, path, format } => {
+        AssetCommands::Usages {
+            name,
+            path,
+            format,
+            fields,
+        } => {
+            let render_options = render_options.with_fields(resolve_field_set(&fields, &path));
             let graph = load_graph(&path)?;
             let usages = assets::find_usages(&graph, &name);
             match format {
@@ -1243,10 +1343,12 @@ fn handle_asset_command(command: AssetCommands) -> anyhow::Result<()> {
                         eprintln!("  no usages found for asset '{name}'");
                     } else {
                         for usage in &usages {
-                            println!(
-                                "  {} ({}) — {}",
-                                usage.node_name, usage.file, usage.asset_name
-                            );
+                            let file_label = if render_options.fields.file {
+                                format!(" ({})", usage.file)
+                            } else {
+                                String::new()
+                            };
+                            println!("  {}{} — {}", usage.node_name, file_label, usage.asset_name);
                         }
                     }
                     Ok(())
@@ -1412,7 +1514,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Symbol { command } => handle_symbol_command(command, render_options)?,
         Commands::Flow { command } => handle_flow_command(command, render_options)?,
         Commands::L10n { command } => handle_l10n_command(command, render_options)?,
-        Commands::Asset { command } => handle_asset_command(command)?,
+        Commands::Asset { command } => handle_asset_command(command, render_options)?,
         Commands::Repo { command } => handle_repo_command(command)?,
     }
 

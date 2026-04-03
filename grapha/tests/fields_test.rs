@@ -27,6 +27,19 @@ fn parse_all_enables_every_field() {
 }
 
 #[test]
+fn parse_full_alias_enables_every_field() {
+    let fs = FieldSet::parse("full");
+    assert!(fs.file);
+    assert!(fs.id);
+    assert!(fs.module);
+    assert!(fs.span);
+    assert!(fs.snippet);
+    assert!(fs.visibility);
+    assert!(fs.signature);
+    assert!(fs.role);
+}
+
+#[test]
 fn parse_none_disables_every_field() {
     let fs = FieldSet::parse("none");
     assert!(!fs.file);

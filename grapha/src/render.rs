@@ -7,8 +7,9 @@ use crate::query::{
     ContextResult, SymbolInfo, SymbolRef, SymbolTreeRef, dataflow::DataflowEdge,
     dataflow::DataflowEdgeKind, dataflow::DataflowNode, dataflow::DataflowNodeKind,
     dataflow::DataflowResult, entries::EntriesResult, impact::ImpactResult, impact::ImpactTreeNode,
-    localize::LocalizeResult, origin::OriginPath, origin::OriginResult, reverse::AffectedEntry,
-    reverse::ReverseResult, trace::Flow, trace::TraceResult, usages::UsagesResult,
+    localize::LocalizeResult, origin::OriginPath, origin::OriginResult, origin::OriginSnippet,
+    reverse::AffectedEntry, reverse::ReverseResult, trace::Flow, trace::TraceResult,
+    usages::UsagesResult,
 };
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -197,12 +198,21 @@ fn format_span(span: [usize; 2]) -> String {
     }
 }
 
-fn escape_snippet(snippet: &str) -> String {
-    snippet
-        .replace('\\', "\\\\")
-        .replace('\n', "\\n")
-        .replace('\r', "\\r")
-        .replace('\t', "\\t")
+fn format_key(key: &str, options: RenderOptions) -> String {
+    let palette = Palette::new(options);
+    palette.key(key)
+}
+
+fn format_file_suffix(file: Option<&str>, options: RenderOptions) -> String {
+    if !options.fields.file {
+        return String::new();
+    }
+
+    let Some(file) = file else {
+        return String::new();
+    };
+
+    format!(" {}", Palette::new(options).file(format!("({file})")))
 }
 
 fn format_name_kind_file(name: &str, kind: NodeKind, file: &str, options: RenderOptions) -> String {
@@ -212,10 +222,7 @@ fn format_name_kind_file(name: &str, kind: NodeKind, file: &str, options: Render
         palette.symbol_name(name),
         palette.tag(format!("[{}]", kind_label(kind))),
     );
-    if options.fields.file {
-        label.push(' ');
-        label.push_str(&palette.file(format!("({file})")));
-    }
+    label.push_str(&format_file_suffix(Some(file), options));
     label
 }
 
@@ -238,7 +245,17 @@ fn push_detail(
     options: RenderOptions,
 ) {
     if let Some(value) = value {
-        children.push(TreeNode::leaf(format_key_value(key, &value, options)));
+        if value.contains('\n') {
+            children.push(TreeNode::branch(
+                format_key(key, options),
+                value
+                    .lines()
+                    .map(|line| TreeNode::leaf(line.to_string()))
+                    .collect(),
+            ));
+        } else {
+            children.push(TreeNode::leaf(format_key_value(key, &value, options)));
+        }
     }
 }
 
@@ -287,12 +304,7 @@ fn symbol_info_details(symbol: &SymbolInfo, options: RenderOptions) -> Vec<TreeN
         );
     }
     if fields.snippet {
-        push_detail(
-            &mut children,
-            "snippet",
-            symbol.snippet.as_deref().map(escape_snippet),
-            options,
-        );
+        push_detail(&mut children, "snippet", symbol.snippet.clone(), options);
     }
 
     children
@@ -338,12 +350,7 @@ fn symbol_ref_details(symbol: &SymbolRef, options: RenderOptions) -> Vec<TreeNod
         );
     }
     if fields.snippet {
-        push_detail(
-            &mut children,
-            "snippet",
-            symbol.snippet.as_deref().map(escape_snippet),
-            options,
-        );
+        push_detail(&mut children, "snippet", symbol.snippet.clone(), options);
     }
 
     children
@@ -389,12 +396,7 @@ fn symbol_tree_ref_details(symbol: &SymbolTreeRef, options: RenderOptions) -> Ve
         );
     }
     if fields.snippet {
-        push_detail(
-            &mut children,
-            "snippet",
-            symbol.snippet.as_deref().map(escape_snippet),
-            options,
-        );
+        push_detail(&mut children, "snippet", symbol.snippet.clone(), options);
     }
 
     children
@@ -588,13 +590,14 @@ fn reverse_root_label(result: &ReverseResult, options: RenderOptions) -> String 
 
 fn reverse_leaf_label(entry: &AffectedEntry, options: RenderOptions) -> String {
     let palette = Palette::new(options);
-    format!(
-        "{} {} {} {}",
+    let mut label = format!(
+        "{} {} {}",
         palette.symbol_name(&entry.entry.name),
         palette.tag("[entry]"),
         palette.tag(format!("[{}]", kind_label(entry.entry.kind))),
-        palette.file(format!("({})", entry.entry.file)),
-    )
+    );
+    label.push_str(&format_file_suffix(Some(&entry.entry.file), options));
+    label
 }
 
 pub fn render_context_with_options(result: &ContextResult, options: RenderOptions) -> String {
@@ -675,10 +678,10 @@ pub fn render_localize_with_options(result: &LocalizeResult, options: RenderOpti
                 item_children.push(TreeNode::leaf(format_key_value(
                     "record",
                     &format!(
-                        "{}.{} {}",
+                        "{}.{}{}",
                         item.record.table,
                         item.record.key,
-                        Palette::new(options).file(format!("({})", item.record.catalog_file))
+                        format_file_suffix(Some(&item.record.catalog_file), options)
                     ),
                     options,
                 )));
@@ -801,10 +804,10 @@ pub fn render_usages_with_options(result: &UsagesResult, options: RenderOptions)
             .collect();
         children.push(TreeNode::branch(
             format!(
-                "{} {}",
+                "{}{}",
                 Palette::new(options)
                     .symbol_name(format!("{}.{}", record.record.table, record.record.key)),
-                Palette::new(options).file(format!("({})", record.record.catalog_file))
+                format_file_suffix(Some(&record.record.catalog_file), options)
             ),
             usage_children,
         ));
@@ -860,18 +863,24 @@ fn dataflow_edge_kind_label(kind: DataflowEdgeKind) -> &'static str {
 fn dataflow_node_label(node: &DataflowNode, options: RenderOptions) -> String {
     let palette = Palette::new(options);
     match node.kind {
-        DataflowNodeKind::Entry => format!(
-            "{} {} {}",
-            palette.symbol_name(&node.name),
-            palette.tag("[entry]"),
-            palette.file(format!("({})", node.file.as_deref().unwrap_or("unknown")))
-        ),
-        DataflowNodeKind::Symbol => format!(
-            "{} {} {}",
-            palette.symbol_name(&node.name),
-            palette.tag("[symbol]"),
-            palette.file(format!("({})", node.file.as_deref().unwrap_or("unknown")))
-        ),
+        DataflowNodeKind::Entry => {
+            let mut label = format!(
+                "{} {}",
+                palette.symbol_name(&node.name),
+                palette.tag("[entry]"),
+            );
+            label.push_str(&format_file_suffix(node.file.as_deref(), options));
+            label
+        }
+        DataflowNodeKind::Symbol => {
+            let mut label = format!(
+                "{} {}",
+                palette.symbol_name(&node.name),
+                palette.tag("[symbol]"),
+            );
+            label.push_str(&format_file_suffix(node.file.as_deref(), options));
+            label
+        }
         DataflowNodeKind::Effect => format!(
             "{} {}",
             palette.symbol_name(&node.name),
@@ -1060,6 +1069,23 @@ fn origin_leaf_label(origin: &OriginPath, options: RenderOptions) -> String {
     )
 }
 
+fn origin_snippet_node(snippet: &OriginSnippet, options: RenderOptions) -> TreeNode {
+    let mut children = vec![TreeNode::leaf(format_key_value(
+        "reason",
+        &snippet.reason,
+        options,
+    ))];
+    push_detail(
+        &mut children,
+        "snippet",
+        Some(snippet.snippet.clone()),
+        options,
+    );
+    let mut symbol_children = symbol_ref_details(&snippet.symbol, options);
+    symbol_children.append(&mut children);
+    tree_node(format_symbol_ref(&snippet.symbol, options), symbol_children)
+}
+
 pub fn render_origin_with_options(result: &OriginResult, options: RenderOptions) -> String {
     let mut children = vec![
         TreeNode::leaf(format_summary(
@@ -1087,6 +1113,39 @@ pub fn render_origin_with_options(result: &OriginResult, options: RenderOptions)
                             options,
                         )));
                     }
+                    if options.fields.snippet && !origin.code_snippets.is_empty() {
+                        item_children.push(TreeNode::branch(
+                            format_section_count(
+                                "code snippets",
+                                origin.code_snippets.len(),
+                                options,
+                            ),
+                            origin
+                                .code_snippets
+                                .iter()
+                                .map(|snippet| origin_snippet_node(snippet, options))
+                                .collect(),
+                        ));
+                    }
+                    if let Some(endpoint) = &origin.endpoint {
+                        item_children.push(TreeNode::leaf(format_key_value(
+                            "endpoint", endpoint, options,
+                        )));
+                    }
+                    if let Some(method) = &origin.request_method {
+                        item_children.push(TreeNode::leaf(format_key_value(
+                            "request_method",
+                            method,
+                            options,
+                        )));
+                    }
+                    if !origin.request_keys.is_empty() {
+                        item_children.push(TreeNode::leaf(format_key_value(
+                            "request_keys",
+                            &origin.request_keys.join(", "),
+                            options,
+                        )));
+                    }
                     item_children.extend(
                         origin
                             .notes
@@ -1098,10 +1157,17 @@ pub fn render_origin_with_options(result: &OriginResult, options: RenderOptions)
                 .collect(),
         ),
     ];
+    if result.truncated {
+        children.push(TreeNode::leaf(format_key_value(
+            "hint",
+            "origin results were truncated to keep traversal bounded",
+            options,
+        )));
+    }
     if result.total_origins == 0 {
         children.push(TreeNode::leaf(format_key_value(
             "hint",
-            "no upstream network terminal found from current graph edges",
+            "no upstream terminal found from current graph edges",
             options,
         )));
     }
@@ -1147,13 +1213,17 @@ pub fn render_impact_with_options(result: &ImpactResult, options: RenderOptions)
 mod tests {
     use grapha_core::graph::{NodeKind, Visibility};
 
+    use crate::localization::{LocalizationCatalogRecord, LocalizationReference};
     use crate::query::{
         ContextResult, SymbolInfo, SymbolRef, SymbolTreeRef, dataflow::DataflowEdge,
         dataflow::DataflowEdgeKind, dataflow::DataflowNode, dataflow::DataflowNodeKind,
         dataflow::DataflowResult, dataflow::DataflowSummary, entries::EntriesResult,
-        impact::ImpactResult, impact::ImpactTreeNode, reverse::AffectedEntry,
+        impact::ImpactResult, impact::ImpactTreeNode, localize::LocalizationMatch,
+        localize::LocalizeResult, localize::UnmatchedLocalizationUsage, origin::OriginPath,
+        origin::OriginResult, origin::OriginSnippet, reverse::AffectedEntry,
         reverse::ReverseResult, trace::Flow, trace::TerminalInfo, trace::TraceResult,
-        trace::TraceSummary,
+        trace::TraceSummary, usages::RecordUsages, usages::UsageQuery, usages::UsageSite,
+        usages::UsagesResult,
     };
 
     use super::*;
@@ -1352,7 +1422,9 @@ mod tests {
         assert!(rendered.contains("visibility: public"));
         assert!(rendered.contains("signature: var body: some View"));
         assert!(rendered.contains("role: internal"));
-        assert!(rendered.contains("snippet: Text(\"Hello\")\\n.padding()"));
+        assert!(rendered.contains("├── snippet"));
+        assert!(rendered.contains("│   ├── Text(\"Hello\")"));
+        assert!(rendered.contains("│   └── .padding()"));
         assert!(rendered.contains("id: ContentView.swift::roomMode"));
         assert!(rendered.contains("signature: @State var roomMode: RoomMode"));
     }
@@ -1371,6 +1443,26 @@ mod tests {
         assert!(rendered.contains("entry points (2)"));
         assert!(rendered.contains("boot [function] (boot.rs)"));
         assert!(rendered.contains("main [function] (main.rs)"));
+    }
+
+    #[test]
+    fn entries_omit_files_when_file_field_disabled() {
+        let result = EntriesResult {
+            entries: vec![
+                symbol_ref("boot", NodeKind::Function, "boot.rs"),
+                symbol_ref("main", NodeKind::Function, "main.rs"),
+            ],
+            total: 2,
+        };
+
+        let rendered = render_entries_with_options(
+            &result,
+            RenderOptions::plain().with_fields(FieldSet::none()),
+        );
+        assert!(rendered.contains("boot [function]"));
+        assert!(rendered.contains("main [function]"));
+        assert!(!rendered.contains("(boot.rs)"));
+        assert!(!rendered.contains("(main.rs)"));
     }
 
     #[test]
@@ -1444,6 +1536,29 @@ mod tests {
         assert!(rendered.contains("service"));
         assert!(rendered.contains("entry1 [entry] [function] (a.rs)"));
         assert!(rendered.contains("entry2 [entry] [function] (b.rs)"));
+    }
+
+    #[test]
+    fn reverse_omits_files_when_file_field_disabled() {
+        let result = ReverseResult {
+            symbol: "target.rs::db".to_string(),
+            affected_entries: vec![AffectedEntry {
+                entry: symbol_ref("entry1", NodeKind::Function, "a.rs"),
+                distance: 2,
+                path: vec!["entry1".into(), "service".into(), "db".into()],
+            }],
+            total_entries: 1,
+            target_ref: symbol_ref("db", NodeKind::Function, "target.rs"),
+        };
+
+        let rendered = render_reverse_with_options(
+            &result,
+            RenderOptions::plain().with_fields(FieldSet::none()),
+        );
+        assert!(rendered.contains("db [function]"));
+        assert!(rendered.contains("entry1 [entry] [function]"));
+        assert!(!rendered.contains("(target.rs)"));
+        assert!(!rendered.contains("(a.rs)"));
     }
 
     #[test]
@@ -1547,5 +1662,248 @@ mod tests {
         assert!(rendered.contains("\x1b[33m[effect:persistence]\x1b[0m"));
         assert!(rendered.contains("\x1b[35moperation\x1b[0m: UPSERT"));
         assert!(rendered.contains("\x1b[35mcondition\x1b[0m: user.isAdmin"));
+    }
+
+    #[test]
+    fn dataflow_omits_files_when_file_field_disabled() {
+        let result = DataflowResult {
+            entry: "main.rs::handler".to_string(),
+            nodes: vec![DataflowNode {
+                id: "helper.rs::load".to_string(),
+                name: "load".to_string(),
+                kind: DataflowNodeKind::Symbol,
+                file: Some("helper.rs".to_string()),
+                effect_kind: None,
+                operation: None,
+                target: None,
+            }],
+            edges: vec![DataflowEdge {
+                source: "main.rs::handler".to_string(),
+                target: "helper.rs::load".to_string(),
+                kind: DataflowEdgeKind::Call,
+                operation: None,
+                conditions: Vec::new(),
+                async_boundary: None,
+                provenance: vec![],
+            }],
+            entry_ref: symbol_ref("handler", NodeKind::Function, "main.rs"),
+            summary: DataflowSummary {
+                symbols: 1,
+                effects: 0,
+                edges: 1,
+                calls: 1,
+                reads: 0,
+                writes: 0,
+                publishes: 0,
+                subscribes: 0,
+            },
+        };
+
+        let rendered = render_dataflow_with_options(
+            &result,
+            RenderOptions::plain().with_fields(FieldSet::none()),
+        );
+        assert!(rendered.contains("handler [function]"));
+        assert!(rendered.contains("load [symbol]"));
+        assert!(!rendered.contains("(main.rs)"));
+        assert!(!rendered.contains("(helper.rs)"));
+    }
+
+    #[test]
+    fn origin_omits_files_when_file_field_disabled() {
+        let result = OriginResult {
+            symbol: "UserAPI.swift::fetchUserInfo".to_string(),
+            target_ref: symbol_ref("fetchUserInfo", NodeKind::Function, "UserAPI.swift"),
+            origins: vec![OriginPath {
+                api: symbol_ref("requestGetUser", NodeKind::Function, "ProfileService.swift"),
+                terminal_kind: "network".to_string(),
+                path: vec![
+                    "fetchUserInfo".into(),
+                    "_getUser".into(),
+                    "requestGetUser".into(),
+                ],
+                field_candidates: Vec::new(),
+                confidence: 0.8,
+                notes: vec!["reached request endpoint user/getUserInfoByUid".into()],
+                endpoint: Some("user/getUserInfoByUid/\\(data.id)".into()),
+                request_method: None,
+                request_keys: vec!["attrs".into()],
+                code_snippets: vec![OriginSnippet {
+                    symbol: symbol_ref(
+                        "requestGetUser",
+                        NodeKind::Function,
+                        "ProfileService.swift",
+                    ),
+                    reason: "request_leaf".into(),
+                    snippet: "func requestGetUser() {}".into(),
+                }],
+            }],
+            total_origins: 1,
+            truncated: false,
+        };
+
+        let rendered = render_origin_with_options(
+            &result,
+            RenderOptions::plain().with_fields(FieldSet::none()),
+        );
+        assert!(rendered.contains("fetchUserInfo [function]"));
+        assert!(rendered.contains("requestGetUser [function] [network 0.80]"));
+        assert!(!rendered.contains("(UserAPI.swift)"));
+        assert!(!rendered.contains("(ProfileService.swift)"));
+        assert!(!rendered.contains("code snippets"));
+    }
+
+    #[test]
+    fn origin_renders_code_snippets_only_when_snippet_field_enabled() {
+        let result = OriginResult {
+            symbol: "UserAPI.swift::fetchUserInfo".to_string(),
+            target_ref: symbol_ref("fetchUserInfo", NodeKind::Function, "UserAPI.swift"),
+            origins: vec![OriginPath {
+                api: symbol_ref("requestGetUser", NodeKind::Function, "ProfileService.swift"),
+                terminal_kind: "network".to_string(),
+                path: vec![
+                    "fetchUserInfo".into(),
+                    "_getUser".into(),
+                    "requestGetUser".into(),
+                ],
+                field_candidates: Vec::new(),
+                confidence: 0.8,
+                notes: vec!["reached request endpoint user/getUserInfoByUid".into()],
+                endpoint: Some("user/getUserInfoByUid/\\(data.id)".into()),
+                request_method: None,
+                request_keys: vec!["attrs".into()],
+                code_snippets: vec![OriginSnippet {
+                    symbol: symbol_ref(
+                        "requestGetUser",
+                        NodeKind::Function,
+                        "ProfileService.swift",
+                    ),
+                    reason: "request_leaf".into(),
+                    snippet: "func requestGetUser() {}".into(),
+                }],
+            }],
+            total_origins: 1,
+            truncated: false,
+        };
+
+        let rendered = render_origin_with_options(
+            &result,
+            RenderOptions::plain().with_fields(FieldSet::parse("snippet")),
+        );
+        assert!(rendered.contains("code snippets (1)"));
+        assert!(rendered.contains("reason: request_leaf"));
+    }
+
+    #[test]
+    fn origin_shows_truncation_hint_even_when_no_origins_survive() {
+        let result = OriginResult {
+            symbol: "UserAPI.swift::fetchUserInfo".to_string(),
+            target_ref: symbol_ref("fetchUserInfo", NodeKind::Function, "UserAPI.swift"),
+            origins: Vec::new(),
+            total_origins: 0,
+            truncated: true,
+        };
+
+        let rendered = render_origin_with_options(&result, RenderOptions::plain());
+        assert!(rendered.contains("hint: origin results were truncated to keep traversal bounded"));
+        assert!(rendered.contains("hint: no upstream terminal found from current graph edges"));
+    }
+
+    #[test]
+    fn localize_omits_catalog_file_when_file_field_disabled() {
+        let result = LocalizeResult {
+            symbol: symbol_info("body", NodeKind::Property, "ContentView.swift"),
+            matches: vec![LocalizationMatch {
+                view: symbol_info("Text", NodeKind::View, "ContentView.swift"),
+                ui_path: vec!["VStack".into(), "Text".into()],
+                reference: LocalizationReference {
+                    ref_kind: "wrapper".into(),
+                    wrapper_name: Some("welcomeTitle".into()),
+                    wrapper_symbol: None,
+                    table: Some("Localizable".into()),
+                    key: Some("welcome_title".into()),
+                    fallback: None,
+                    arg_count: None,
+                    literal: None,
+                },
+                record: LocalizationCatalogRecord {
+                    table: "Localizable".into(),
+                    key: "welcome_title".into(),
+                    catalog_file: "Localizable.xcstrings".into(),
+                    catalog_dir: ".".into(),
+                    source_language: "en".into(),
+                    source_value: "Welcome".into(),
+                    status: "translated".into(),
+                    comment: None,
+                },
+                match_kind: "wrapper".into(),
+            }],
+            unmatched: vec![UnmatchedLocalizationUsage {
+                view: symbol_info("Text", NodeKind::View, "ContentView.swift"),
+                ui_path: Vec::new(),
+                reference: LocalizationReference {
+                    ref_kind: "literal".into(),
+                    wrapper_name: None,
+                    wrapper_symbol: None,
+                    table: None,
+                    key: None,
+                    fallback: None,
+                    arg_count: None,
+                    literal: Some("Hello".into()),
+                },
+                reason: "no record".into(),
+            }],
+        };
+
+        let rendered = render_localize_with_options(
+            &result,
+            RenderOptions::plain().with_fields(FieldSet::none()),
+        );
+        assert!(rendered.contains("record: Localizable.welcome_title"));
+        assert!(!rendered.contains("Localizable.xcstrings"));
+    }
+
+    #[test]
+    fn usages_omits_catalog_file_when_file_field_disabled() {
+        let result = UsagesResult {
+            query: UsageQuery {
+                key: "welcome_title".into(),
+                table: Some("Localizable".into()),
+            },
+            records: vec![RecordUsages {
+                record: LocalizationCatalogRecord {
+                    table: "Localizable".into(),
+                    key: "welcome_title".into(),
+                    catalog_file: "Localizable.xcstrings".into(),
+                    catalog_dir: ".".into(),
+                    source_language: "en".into(),
+                    source_value: "Welcome".into(),
+                    status: "translated".into(),
+                    comment: None,
+                },
+                usages: vec![UsageSite {
+                    owner: symbol_info("body", NodeKind::Property, "ContentView.swift"),
+                    view: symbol_info("Text", NodeKind::View, "ContentView.swift"),
+                    ui_path: vec!["Text".into()],
+                    reference: LocalizationReference {
+                        ref_kind: "wrapper".into(),
+                        wrapper_name: Some("welcomeTitle".into()),
+                        wrapper_symbol: None,
+                        table: Some("Localizable".into()),
+                        key: Some("welcome_title".into()),
+                        fallback: None,
+                        arg_count: None,
+                        literal: None,
+                    },
+                }],
+            }],
+        };
+
+        let rendered = render_usages_with_options(
+            &result,
+            RenderOptions::plain().with_fields(FieldSet::none()),
+        );
+        assert!(rendered.contains("Localizable.welcome_title"));
+        assert!(!rendered.contains("Localizable.xcstrings"));
     }
 }
