@@ -8,6 +8,16 @@ struct NameEntry {
     module: Option<String>,
 }
 
+struct ResolveContext<'a> {
+    raw_target: &'a str,
+    source_module: Option<&'a str>,
+    source_imports: Option<&'a HashSet<String>>,
+    prefix_hint: Option<&'a str>,
+    source_owner_names: &'a [String],
+    candidate_to_owner_names: &'a HashMap<String, Vec<String>>,
+    candidate_file_stems: &'a HashMap<String, String>,
+}
+
 fn looks_like_file_path(segment: &str) -> bool {
     segment.contains('/') || segment.ends_with(".rs") || segment.ends_with(".swift")
 }
@@ -311,16 +321,16 @@ pub fn merge(results: Vec<ExtractionResult>) -> Graph {
             }
         }
 
-        let resolved = resolve_candidates(
-            &edge.target,
-            candidates,
+        let resolve_context = ResolveContext {
+            raw_target: &edge.target,
             source_module,
             source_imports,
             prefix_hint,
-            &source_owner_names,
-            &candidate_to_owner_names,
-            &candidate_file_stems,
-        );
+            source_owner_names: &source_owner_names,
+            candidate_to_owner_names: &candidate_to_owner_names,
+            candidate_file_stems: &candidate_file_stems,
+        };
+        let resolved = resolve_candidates(candidates, &resolve_context);
         for (candidate_id, factor) in resolved {
             let mut resolved_edge = edge.clone();
             resolved_edge.target = candidate_id;
@@ -394,29 +404,23 @@ fn candidate_matches_hint(
 }
 
 fn resolve_candidates(
-    raw_target: &str,
     candidates: &[NameEntry],
-    source_module: Option<&str>,
-    source_imports: Option<&HashSet<String>>,
-    prefix_hint: Option<&str>,
-    source_owner_names: &[String],
-    candidate_to_owner_names: &HashMap<String, Vec<String>>,
-    candidate_file_stems: &HashMap<String, String>,
+    context: &ResolveContext<'_>,
 ) -> Vec<(String, f64)> {
     let same_module: Vec<&NameEntry> = candidates
         .iter()
-        .filter(|candidate| modules_match(source_module, candidate.module.as_deref()))
+        .filter(|candidate| modules_match(context.source_module, candidate.module.as_deref()))
         .collect();
     if same_module.len() == 1 {
-        if let Some(hint) = prefix_hint
+        if let Some(hint) = context.prefix_hint
             && !candidate_matches_hint(
                 same_module[0],
                 hint,
-                source_owner_names,
-                candidate_to_owner_names,
-                candidate_file_stems,
+                context.source_owner_names,
+                context.candidate_to_owner_names,
+                context.candidate_file_stems,
             )
-            && should_enforce_hint(raw_target, hint)
+            && should_enforce_hint(context.raw_target, hint)
         {
             return Vec::new();
         }
@@ -424,23 +428,23 @@ fn resolve_candidates(
     }
 
     if same_module.len() > 1 {
-        if let Some(hint) = prefix_hint {
+        if let Some(hint) = context.prefix_hint {
             let narrowed: Vec<&&NameEntry> = same_module
                 .iter()
                 .filter(|candidate| {
                     candidate_matches_hint(
                         candidate,
                         hint,
-                        source_owner_names,
-                        candidate_to_owner_names,
-                        candidate_file_stems,
+                        context.source_owner_names,
+                        context.candidate_to_owner_names,
+                        context.candidate_file_stems,
                     )
                 })
                 .collect();
             if narrowed.len() == 1 {
                 return vec![(narrowed[0].id.clone(), 0.85)];
             }
-            if narrowed.is_empty() && should_enforce_hint(raw_target, hint) {
+            if narrowed.is_empty() && should_enforce_hint(context.raw_target, hint) {
                 return Vec::new();
             }
         }
@@ -451,7 +455,7 @@ fn resolve_candidates(
             .collect();
     }
 
-    if let Some(imports) = source_imports {
+    if let Some(imports) = context.source_imports {
         let imported: Vec<&NameEntry> = candidates
             .iter()
             .filter(|candidate| {
