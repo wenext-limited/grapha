@@ -45,6 +45,11 @@ pub struct LineIndex<'a> {
     line_starts: Vec<usize>,
 }
 
+struct SnippetCandidate {
+    snippet: String,
+    anchor_line: usize,
+}
+
 impl<'a> LineIndex<'a> {
     pub fn new(source: &'a str) -> Self {
         let mut line_starts = vec![0usize];
@@ -97,19 +102,36 @@ impl<'a> LineIndex<'a> {
         }
     }
 
-    fn declaration_line_for_symbol(&self, symbol: &str, kind: NodeKind) -> Option<String> {
+    fn declaration_line_for_symbol(
+        &self,
+        symbol: &str,
+        kind: NodeKind,
+        preferred_line: usize,
+    ) -> Option<SnippetCandidate> {
         let symbol = symbol.trim();
         if symbol.is_empty() {
             return None;
         }
 
-        self.source.lines().find_map(|line| {
-            let trimmed = line.trim_end();
-            declaration_matches_symbol(trimmed, symbol, kind).then(|| trimmed.to_string())
-        })
+        self.source
+            .lines()
+            .enumerate()
+            .filter_map(|(line_idx, line)| {
+                let trimmed = line.trim_end();
+                declaration_matches_symbol(trimmed, symbol, kind).then(|| SnippetCandidate {
+                    snippet: trimmed.to_string(),
+                    anchor_line: line_idx,
+                })
+            })
+            .min_by_key(|candidate| candidate.anchor_line.abs_diff(preferred_line))
     }
 
-    fn declaration_block_for_symbol(&self, symbol: &str, kind: NodeKind) -> Option<String> {
+    fn declaration_block_for_symbol(
+        &self,
+        symbol: &str,
+        kind: NodeKind,
+        preferred_line: usize,
+    ) -> Option<SnippetCandidate> {
         if kind != NodeKind::Function {
             return None;
         }
@@ -122,7 +144,11 @@ impl<'a> LineIndex<'a> {
         let lines: Vec<&str> = self.source.lines().collect();
         let start_idx = lines
             .iter()
-            .position(|line| declaration_matches_symbol(line.trim_end(), symbol, kind))?;
+            .enumerate()
+            .filter_map(|(line_idx, line)| {
+                declaration_matches_symbol(line.trim_end(), symbol, kind).then_some(line_idx)
+            })
+            .min_by_key(|line_idx| line_idx.abs_diff(preferred_line))?;
 
         let mut collected = Vec::new();
         let mut brace_depth = 0usize;
@@ -146,7 +172,10 @@ impl<'a> LineIndex<'a> {
             }
 
             if saw_open_brace && brace_depth == 0 {
-                return Some(trim_snippet_indentation(&collected.join("\n")));
+                return Some(SnippetCandidate {
+                    snippet: trim_snippet_indentation(&collected.join("\n")),
+                    anchor_line: start_idx,
+                });
             }
         }
 
@@ -154,13 +183,20 @@ impl<'a> LineIndex<'a> {
     }
 
     fn score_candidate(
-        candidate: &str,
+        candidate: &SnippetCandidate,
         symbol: &str,
         kind: NodeKind,
         preferred_line: usize,
-    ) -> (usize, usize, usize, usize) {
-        let trimmed = candidate.trim();
+    ) -> (usize, usize, usize, usize, usize) {
+        let trimmed = candidate.snippet.trim();
         let symbol_match = usize::from(!symbol.is_empty() && trimmed.contains(symbol));
+        let declaration_head_match = usize::from(
+            trimmed
+                .lines()
+                .map(str::trim)
+                .find(|line| !line.is_empty() && !line.starts_with('@'))
+                .is_some_and(|line| declaration_matches_symbol(line, symbol, kind)),
+        );
         let kind_match = usize::from(match kind {
             NodeKind::Function => {
                 trimmed.contains("func ")
@@ -182,17 +218,11 @@ impl<'a> LineIndex<'a> {
         let body_match = usize::from(
             kind == NodeKind::Function && trimmed.contains('{') && trimmed.contains('}'),
         );
-        let distance = candidate
-            .lines()
-            .enumerate()
-            .find_map(|(idx, line)| {
-                line.contains(symbol)
-                    .then_some(idx.abs_diff(preferred_line))
-            })
-            .unwrap_or(usize::MAX / 4);
+        let distance = candidate.anchor_line.abs_diff(preferred_line);
 
         (
             symbol_match,
+            declaration_head_match,
             kind_match,
             body_match,
             usize::MAX.saturating_sub(distance),
@@ -248,16 +278,36 @@ impl<'a> LineIndex<'a> {
 
         let mut candidates = Vec::new();
         for candidate in [
-            self.extract_exact_span_with_base(span, false),
-            self.extract_exact_span_with_base(span, true),
-            self.extract_full_lines_with_base(span, false),
-            self.extract_full_lines_with_base(span, true),
-            self.declaration_block_for_symbol(symbol, kind),
+            self.extract_exact_span_with_base(span, false)
+                .map(|snippet| SnippetCandidate {
+                    snippet,
+                    anchor_line: span.start[0],
+                }),
+            self.extract_exact_span_with_base(span, true)
+                .map(|snippet| SnippetCandidate {
+                    snippet,
+                    anchor_line: span.start[0].saturating_sub(1),
+                }),
+            self.extract_full_lines_with_base(span, false)
+                .map(|snippet| SnippetCandidate {
+                    snippet,
+                    anchor_line: span.start[0],
+                }),
+            self.extract_full_lines_with_base(span, true)
+                .map(|snippet| SnippetCandidate {
+                    snippet,
+                    anchor_line: span.start[0].saturating_sub(1),
+                }),
+            self.declaration_block_for_symbol(symbol, kind, preferred_line),
         ]
         .into_iter()
         .flatten()
         {
-            if !candidate.trim().is_empty() && !candidates.contains(&candidate) {
+            if !candidate.snippet.trim().is_empty()
+                && !candidates
+                    .iter()
+                    .any(|existing: &SnippetCandidate| existing.snippet == candidate.snippet)
+            {
                 candidates.push(candidate);
             }
         }
@@ -268,12 +318,12 @@ impl<'a> LineIndex<'a> {
         {
             let best_score = Self::score_candidate(&best, symbol, kind, preferred_line);
             if best_score.0 > 0 || best_score.1 > 0 {
-                return Some(trim_snippet_indentation(&best));
+                return Some(trim_snippet_indentation(&best.snippet));
             }
         }
 
-        self.declaration_line_for_symbol(symbol, kind)
-            .map(|snippet| trim_snippet_indentation(&snippet))
+        self.declaration_line_for_symbol(symbol, kind, preferred_line)
+            .map(|candidate| trim_snippet_indentation(&candidate.snippet))
     }
 
     #[allow(dead_code)]
@@ -426,6 +476,21 @@ mod tests {
                 "@inline(__always) private func requestGetUser(\n    _ data: SingleUserRequest\n) async throws(RequestError) -> UserInfo {\n    try await request(\n        \"user/getUserInfoByUid/\\\\(data.id)\",\n        data: [\"attrs\": data.attrs.map(\\\\.rawValue).sorted()]\n    )\n}"
                     .to_string()
             )
+        );
+    }
+
+    #[test]
+    fn extract_symbol_snippet_prefers_nearest_matching_function_block() {
+        let source = "extension Worker {\n    func load() {\n        first()\n    }\n}\n\nextension Worker {\n    func load() {\n        second()\n    }\n}\n";
+        let index = LineIndex::new(source);
+        let span = Span {
+            start: [7, 4],
+            end: [9, 5],
+        };
+
+        assert_eq!(
+            index.extract_symbol_snippet(&span, "load()", NodeKind::Function),
+            Some("func load() {\n    second()\n}".to_string())
         );
     }
 

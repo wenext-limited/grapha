@@ -156,7 +156,8 @@ pub fn resolve_node<'a>(graph: &'a Graph, query: &str) -> Result<&'a Node, Query
     let locators = SymbolLocatorIndex::new(graph);
 
     let path_matches: Vec<_> = if query.contains("::") {
-        graph.nodes
+        graph
+            .nodes
             .iter()
             .filter_map(|node| {
                 let locator = locators.locator_for_id(&node.id)?;
@@ -199,7 +200,8 @@ pub fn resolve_node<'a>(graph: &'a Graph, query: &str) -> Result<&'a Node, Query
 
     let (candidate_nodes, match_query): (Vec<&Node>, &str) = match split_file_symbol_query(query) {
         Some((file_part, symbol_part)) => (
-            graph.nodes
+            graph
+                .nodes
                 .iter()
                 .filter(|node| node.file.to_string_lossy().ends_with(file_part))
                 .collect(),
@@ -279,15 +281,15 @@ pub struct SymbolInfo {
     pub kind: NodeKind,
     pub file: String,
     pub span: [usize; 2],
-    #[serde(skip)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub visibility: Option<Visibility>,
-    #[serde(skip)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub role: Option<NodeRole>,
-    #[serde(skip)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub signature: Option<String>,
-    #[serde(skip)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub module: Option<String>,
-    #[serde(skip)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub snippet: Option<String>,
 }
 
@@ -299,17 +301,17 @@ pub struct SymbolRef {
     pub name: String,
     pub kind: NodeKind,
     pub file: String,
-    #[serde(skip)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub span: Option<[usize; 2]>,
-    #[serde(skip)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub visibility: Option<Visibility>,
-    #[serde(skip)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub role: Option<NodeRole>,
-    #[serde(skip)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub signature: Option<String>,
-    #[serde(skip)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub module: Option<String>,
-    #[serde(skip)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub snippet: Option<String>,
 }
 
@@ -321,17 +323,17 @@ pub struct SymbolTreeRef {
     pub name: String,
     pub kind: NodeKind,
     pub file: String,
-    #[serde(skip)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub span: Option<[usize; 2]>,
-    #[serde(skip)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub visibility: Option<Visibility>,
-    #[serde(skip)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub role: Option<NodeRole>,
-    #[serde(skip)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub signature: Option<String>,
-    #[serde(skip)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub module: Option<String>,
-    #[serde(skip)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub snippet: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub contains: Vec<SymbolTreeRef>,
@@ -443,25 +445,25 @@ mod tests {
         let graph = Graph {
             version: "0.1.0".to_string(),
             nodes: vec![
-            make_node(
-                "variant-id",
-                "sendGift",
-                NodeKind::Variant,
-                "FamilyServiceCore.swift",
-            ),
-            make_node(
-                "property-id",
-                "sendGift",
-                NodeKind::Property,
-                "GiftView.swift",
-            ),
-            make_node(
-                "function-id",
-                "sendGift(req:)",
-                NodeKind::Function,
-                "GiftServiceCore.swift",
-            ),
-        ],
+                make_node(
+                    "variant-id",
+                    "sendGift",
+                    NodeKind::Variant,
+                    "FamilyServiceCore.swift",
+                ),
+                make_node(
+                    "property-id",
+                    "sendGift",
+                    NodeKind::Property,
+                    "GiftView.swift",
+                ),
+                make_node(
+                    "function-id",
+                    "sendGift(req:)",
+                    NodeKind::Function,
+                    "GiftServiceCore.swift",
+                ),
+            ],
             edges: vec![],
         };
 
@@ -474,25 +476,25 @@ mod tests {
         let graph = Graph {
             version: "0.1.0".to_string(),
             nodes: vec![
-            make_node(
-                "function-1",
-                "sendGift(req:)",
-                NodeKind::Function,
-                "GiftServiceCore.swift",
-            ),
-            make_node(
-                "function-2",
-                "sendGift(goods:targetId:)",
-                NodeKind::Function,
-                "StoreModule.swift",
-            ),
-            make_node(
-                "variant-id",
-                "sendGift",
-                NodeKind::Variant,
-                "HeadlineData.swift",
-            ),
-        ],
+                make_node(
+                    "function-1",
+                    "sendGift(req:)",
+                    NodeKind::Function,
+                    "GiftServiceCore.swift",
+                ),
+                make_node(
+                    "function-2",
+                    "sendGift(goods:targetId:)",
+                    NodeKind::Function,
+                    "StoreModule.swift",
+                ),
+                make_node(
+                    "variant-id",
+                    "sendGift",
+                    NodeKind::Variant,
+                    "HeadlineData.swift",
+                ),
+            ],
             edges: vec![],
         };
 
@@ -516,19 +518,19 @@ mod tests {
         let graph = Graph {
             version: "0.1.0".to_string(),
             nodes: vec![
-            make_node(
-                "s:12ModuleExport15GiftServiceCoreC04sendC03reqy...",
-                "sendGift(req:)",
-                NodeKind::Function,
-                "GiftServiceCore.swift",
-            ),
-            make_node(
-                "s:5Store0A6ModuleC8sendGift5goods8targetIdy...",
-                "sendGift(goods:targetId:)",
-                NodeKind::Function,
-                "StoreModule.swift",
-            ),
-        ],
+                make_node(
+                    "s:12ModuleExport15GiftServiceCoreC04sendC03reqy...",
+                    "sendGift(req:)",
+                    NodeKind::Function,
+                    "GiftServiceCore.swift",
+                ),
+                make_node(
+                    "s:5Store0A6ModuleC8sendGift5goods8targetIdy...",
+                    "sendGift(goods:targetId:)",
+                    NodeKind::Function,
+                    "StoreModule.swift",
+                ),
+            ],
             edges: vec![],
         };
 
@@ -541,19 +543,19 @@ mod tests {
         let graph = Graph {
             version: "0.1.0".to_string(),
             nodes: vec![
-            make_node(
-                "ContentView.swift::ContentView::body::view:Row@10:12",
-                "Row",
-                NodeKind::View,
-                "ContentView.swift",
-            ),
-            make_node(
-                "ContentView.swift::Row",
-                "Row",
-                NodeKind::Struct,
-                "ContentView.swift",
-            ),
-        ],
+                make_node(
+                    "ContentView.swift::ContentView::body::view:Row@10:12",
+                    "Row",
+                    NodeKind::View,
+                    "ContentView.swift",
+                ),
+                make_node(
+                    "ContentView.swift::Row",
+                    "Row",
+                    NodeKind::Struct,
+                    "ContentView.swift",
+                ),
+            ],
             edges: vec![],
         };
 

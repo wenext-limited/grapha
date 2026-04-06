@@ -10,8 +10,11 @@ pub struct SymbolLocatorIndex {
 
 impl SymbolLocatorIndex {
     pub fn new(graph: &Graph) -> Self {
-        let node_index: HashMap<&str, &Node> =
-            graph.nodes.iter().map(|node| (node.id.as_str(), node)).collect();
+        let node_index: HashMap<&str, &Node> = graph
+            .nodes
+            .iter()
+            .map(|node| (node.id.as_str(), node))
+            .collect();
         let parent_by_child = select_parents(graph, &node_index);
         let mut locators = HashMap::with_capacity(graph.nodes.len());
 
@@ -45,12 +48,14 @@ impl SymbolLocatorIndex {
 
 pub fn fallback_locator(node: &Node) -> String {
     let mut parts = Vec::new();
+    let file = file_label(&node.file);
     if let Some(module) = node.module.as_deref()
         && !module.is_empty()
+        && module != file
     {
         parts.push(module.to_string());
     }
-    parts.push(file_label(&node.file).to_string());
+    parts.push(file.to_string());
     parts.push(node.name.clone());
     parts.join("::")
 }
@@ -75,7 +80,9 @@ fn select_parents<'a>(
         if edge.kind != EdgeKind::Contains {
             continue;
         }
-        if node_index.contains_key(edge.source.as_str()) && node_index.contains_key(edge.target.as_str()) {
+        if node_index.contains_key(edge.source.as_str())
+            && node_index.contains_key(edge.target.as_str())
+        {
             candidates
                 .entry(edge.target.as_str())
                 .or_default()
@@ -101,7 +108,10 @@ fn select_parents<'a>(
                     .then_with(|| left.span.end.cmp(&right.span.end))
                     .then_with(|| left.id.cmp(&right.id))
             });
-            parents.into_iter().next().map(|parent_id| (child_id, parent_id))
+            parents
+                .into_iter()
+                .next()
+                .map(|parent_id| (child_id, parent_id))
         })
         .collect()
 }
@@ -137,12 +147,14 @@ fn build_locator<'a>(
     owner_ids.reverse();
 
     let mut parts = Vec::new();
+    let file = file_label(&node.file);
     if let Some(module) = node.module.as_deref()
         && !module.is_empty()
+        && module != file
     {
         parts.push(module.to_string());
     }
-    parts.push(file_label(&node.file));
+    parts.push(file);
     for owner_id in owner_ids {
         let owner = node_index.get(owner_id).copied()?;
         parts.push(owner.name.clone());

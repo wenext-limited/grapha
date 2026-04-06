@@ -2,6 +2,8 @@ use grapha_core::graph::{Edge, EdgeKind, Graph, NodeKind};
 use serde::Serialize;
 use std::collections::BTreeMap;
 
+use crate::symbol_locator::SymbolLocatorIndex;
+
 #[derive(Debug, Serialize)]
 pub struct GroupedGraph {
     pub version: String,
@@ -15,6 +17,8 @@ pub struct FileGroup {
 
 #[derive(Debug, Serialize)]
 pub struct SymbolSummary {
+    pub id: String,
+    pub locator: String,
     pub name: String,
     pub kind: NodeKind,
     pub span: [usize; 2],
@@ -42,6 +46,7 @@ pub struct SymbolSummary {
 
 pub fn group(graph: &Graph) -> GroupedGraph {
     let mut files: BTreeMap<String, Vec<SymbolSummary>> = BTreeMap::new();
+    let locators = SymbolLocatorIndex::new(graph);
 
     let mut edges_by_source: BTreeMap<&str, Vec<&Edge>> = BTreeMap::new();
     for edge in &graph.edges {
@@ -120,6 +125,8 @@ pub fn group(graph: &Graph) -> GroupedGraph {
 
         let file_key = node.file.to_string_lossy().to_string();
         files.entry(file_key).or_default().push(SymbolSummary {
+            id: node.id.clone(),
+            locator: locators.locator_for_node(node),
             name: node.name.clone(),
             kind: node.kind,
             span: [node.span.start[0], node.span.end[0]],
@@ -232,6 +239,8 @@ mod tests {
         assert!(json.contains("entry_point"));
         assert!(json.contains("fn main()"));
         assert!(json.contains("app"));
+        assert!(json.contains("\"id\":\"a.rs::main\""));
+        assert!(json.contains("\"locator\":"));
     }
 
     #[test]
@@ -298,5 +307,41 @@ mod tests {
         let json = serde_json::to_string(&grouped).unwrap();
         assert!(!json.contains("\"calls\""));
         assert!(!json.contains("\"members\""));
+    }
+
+    #[test]
+    fn grouped_output_preserves_member_relationships() {
+        let graph = Graph {
+            version: "0.1.0".to_string(),
+            nodes: vec![
+                make_node("a.rs::Foo", "Foo", NodeKind::Struct, "a.rs", 0),
+                make_node(
+                    "a.rs::Foo::helper",
+                    "helper",
+                    NodeKind::Function,
+                    "a.rs",
+                    10,
+                ),
+            ],
+            edges: vec![Edge {
+                source: "a.rs::Foo".to_string(),
+                target: "a.rs::Foo::helper".to_string(),
+                kind: EdgeKind::Contains,
+                confidence: 1.0,
+                direction: None,
+                operation: None,
+                condition: None,
+                async_boundary: None,
+                provenance: Vec::new(),
+            }],
+        };
+
+        let grouped = group(&graph);
+        let foo = grouped.files["a.rs"]
+            .symbols
+            .iter()
+            .find(|symbol| symbol.name == "Foo")
+            .unwrap();
+        assert_eq!(foo.members, vec!["helper"]);
     }
 }

@@ -809,7 +809,9 @@ fn resolve_field_set(fields_flag: &Option<String>, path: &Path) -> fields::Field
 fn resolve_search_field_set(fields_flag: &Option<String>, path: &Path) -> fields::FieldSet {
     match fields_flag {
         Some(_) => resolve_field_set(fields_flag, path),
-        None => resolve_field_set(fields_flag, path).with_id().with_locator(),
+        None => resolve_field_set(fields_flag, path)
+            .with_id()
+            .with_locator(),
     }
 }
 

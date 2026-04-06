@@ -2,7 +2,7 @@ use grapha_core::graph::{Edge, EdgeKind, Graph, Node, NodeKind, Visibility};
 use std::collections::HashSet;
 
 /// Prune a graph for LLM consumption:
-/// 1. Drop Contains edges (inferrable from span nesting)
+/// 1. Preserve ownership edges so grouped output keeps symbol structure
 /// 2. Drop Uses edges with raw text targets (not graph-traversable)
 /// 3. Optionally drop private leaf nodes (fields, variants)
 pub fn prune(graph: Graph, keep_private_leaves: bool) -> Graph {
@@ -20,27 +20,10 @@ pub fn prune(graph: Graph, keep_private_leaves: bool) -> Graph {
     };
 
     let kept_ids: HashSet<&str> = kept_nodes.iter().map(|n| n.id.as_str()).collect();
-    let kept_kinds: std::collections::HashMap<&str, NodeKind> =
-        kept_nodes.iter().map(|n| (n.id.as_str(), n.kind)).collect();
-
     let edges: Vec<Edge> = graph
         .edges
         .into_iter()
         .filter(|e| {
-            if e.kind == EdgeKind::Contains {
-                let source_kind = kept_kinds.get(e.source.as_str()).copied();
-                let target_kind = kept_kinds.get(e.target.as_str()).copied();
-                let keep_swiftui_contains = matches!(
-                    (source_kind, target_kind),
-                    (
-                        Some(NodeKind::View | NodeKind::Branch | NodeKind::Property),
-                        Some(NodeKind::View | NodeKind::Branch)
-                    )
-                );
-                if !keep_swiftui_contains {
-                    return false;
-                }
-            }
             if e.kind == EdgeKind::Uses && !kept_ids.contains(e.target.as_str()) {
                 return false;
             }
@@ -84,7 +67,7 @@ mod tests {
     }
 
     #[test]
-    fn prune_drops_contains_edges() {
+    fn prune_keeps_contains_edges_between_kept_nodes() {
         let graph = Graph {
             version: "0.1.0".to_string(),
             nodes: vec![
@@ -117,8 +100,14 @@ mod tests {
             ],
         };
         let pruned = prune(graph, true);
-        assert_eq!(pruned.edges.len(), 1);
-        assert_eq!(pruned.edges[0].kind, EdgeKind::Calls);
+        assert_eq!(pruned.edges.len(), 2);
+        assert!(
+            pruned
+                .edges
+                .iter()
+                .any(|edge| edge.kind == EdgeKind::Contains)
+        );
+        assert!(pruned.edges.iter().any(|edge| edge.kind == EdgeKind::Calls));
     }
 
     #[test]

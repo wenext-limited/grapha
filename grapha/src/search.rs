@@ -151,7 +151,11 @@ fn rebuild_index_impl(graph: &Graph, index_path: &Path) -> Result<Index> {
     let mut writer = index_writer(&index)?;
     let locators = SymbolLocatorIndex::new(graph);
     for node in &graph.nodes {
-        writer.add_document(node_document(fields, node, &locators.locator_for_node(node))?)?;
+        writer.add_document(node_document(
+            fields,
+            node,
+            &locators.locator_for_node(node),
+        )?)?;
     }
     writer.commit()?;
     Ok(index)
@@ -220,7 +224,11 @@ pub fn sync_index(
         .copied()
         .chain(delta.updated_nodes.iter().copied())
     {
-        writer.add_document(node_document(fields, node, &locators.locator_for_node(node))?)?;
+        writer.add_document(node_document(
+            fields,
+            node,
+            &locators.locator_for_node(node),
+        )?)?;
     }
     writer.commit()?;
 
