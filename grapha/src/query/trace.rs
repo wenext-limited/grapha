@@ -60,7 +60,7 @@ pub fn query_trace(
     entry: &str,
     max_depth: usize,
 ) -> Result<TraceResult, QueryResolveError> {
-    let entry_node = crate::query::resolve_node(&graph.nodes, entry)?;
+    let entry_node = crate::query::resolve_node(graph, entry)?;
 
     let node_index: HashMap<&str, usize> = graph
         .nodes

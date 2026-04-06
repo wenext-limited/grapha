@@ -2,20 +2,23 @@ use std::collections::{HashMap, HashSet};
 
 use grapha_core::graph::{EdgeKind, Graph};
 
+use crate::symbol_locator::SymbolLocatorIndex;
+
 use super::{
     ContextResult, QueryResolveError, SymbolInfo, SymbolRef, SymbolTreeRef,
     is_swiftui_invalidation_source,
 };
 
-fn to_symbol_ref(node: &grapha_core::graph::Node) -> SymbolRef {
-    SymbolRef::from_node(node)
+fn to_symbol_ref(node: &grapha_core::graph::Node, locators: &SymbolLocatorIndex) -> SymbolRef {
+    SymbolRef::from_node(node).with_locator(locators.locator_for_node(node))
 }
 
 fn to_symbol_tree_ref(
     node: &grapha_core::graph::Node,
     contains: Vec<SymbolTreeRef>,
+    locators: &SymbolLocatorIndex,
 ) -> SymbolTreeRef {
-    SymbolTreeRef::from_node(node, contains)
+    SymbolTreeRef::from_node(node, contains).with_locator(locators.locator_for_node(node))
 }
 
 fn sort_refs_by_name(symbols: &mut [SymbolRef]) {
@@ -51,6 +54,7 @@ fn build_contains_tree<'a>(
     type_ref_adj: &HashMap<&'a str, Vec<&'a str>>,
     node_index: &HashMap<&'a str, &'a grapha_core::graph::Node>,
     ancestors: &mut Vec<&'a str>,
+    locators: &SymbolLocatorIndex,
 ) -> Option<SymbolTreeRef> {
     if ancestors.contains(&node_id) {
         return None;
@@ -65,7 +69,14 @@ fn build_contains_tree<'a>(
     let mut contains: Vec<_> = child_ids
         .into_iter()
         .filter_map(|child_id| {
-            build_contains_tree(child_id, contains_adj, type_ref_adj, node_index, ancestors)
+            build_contains_tree(
+                child_id,
+                contains_adj,
+                type_ref_adj,
+                node_index,
+                ancestors,
+                locators,
+            )
         })
         .collect();
 
@@ -86,19 +97,27 @@ fn build_contains_tree<'a>(
             let mut inline_child_ids = contains_adj.get(type_ref_id).cloned().unwrap_or_default();
             sort_ids_by_span(&mut inline_child_ids, node_index);
             contains.extend(inline_child_ids.into_iter().filter_map(|child_id| {
-                build_contains_tree(child_id, contains_adj, type_ref_adj, node_index, ancestors)
+                build_contains_tree(
+                    child_id,
+                    contains_adj,
+                    type_ref_adj,
+                    node_index,
+                    ancestors,
+                    locators,
+                )
             }));
         }
     }
 
     ancestors.pop();
-    Some(to_symbol_tree_ref(node, contains))
+    Some(to_symbol_tree_ref(node, contains, locators))
 }
 
 fn collect_invalidation_sources<'a>(
     start_id: &'a str,
     reads_adj: &HashMap<&'a str, Vec<&'a str>>,
     node_index: &HashMap<&'a str, &'a grapha_core::graph::Node>,
+    locators: &SymbolLocatorIndex,
 ) -> Vec<SymbolRef> {
     let mut visited = HashSet::new();
     let mut invalidation_sources = Vec::new();
@@ -113,7 +132,7 @@ fn collect_invalidation_sources<'a>(
             continue;
         };
         if is_swiftui_invalidation_source(node) {
-            invalidation_sources.push(to_symbol_ref(node));
+            invalidation_sources.push(to_symbol_ref(node, locators));
         }
 
         if let Some(next_ids) = reads_adj.get(node_id) {
@@ -125,7 +144,8 @@ fn collect_invalidation_sources<'a>(
 }
 
 pub fn query_context(graph: &Graph, query: &str) -> Result<ContextResult, QueryResolveError> {
-    let node = crate::query::resolve_node(&graph.nodes, query)?;
+    let node = crate::query::resolve_node(graph, query)?;
+    let locators = SymbolLocatorIndex::new(graph);
 
     let node_index: HashMap<&str, &grapha_core::graph::Node> =
         graph.nodes.iter().map(|n| (n.id.as_str(), n)).collect();
@@ -147,7 +167,7 @@ pub fn query_context(graph: &Graph, query: &str) -> Result<ContextResult, QueryR
         if edge.source == node.id
             && let Some(target) = node_index.get(edge.target.as_str())
         {
-            let sym_ref = to_symbol_ref(target);
+            let sym_ref = to_symbol_ref(target, &locators);
             match edge.kind {
                 EdgeKind::Calls => callees.push(sym_ref),
                 EdgeKind::Reads => reads.push(sym_ref),
@@ -160,7 +180,7 @@ pub fn query_context(graph: &Graph, query: &str) -> Result<ContextResult, QueryR
         if edge.target == node.id
             && let Some(source) = node_index.get(edge.source.as_str())
         {
-            let sym_ref = to_symbol_ref(source);
+            let sym_ref = to_symbol_ref(source, &locators);
             match edge.kind {
                 EdgeKind::Calls => callers.push(sym_ref),
                 EdgeKind::Reads => read_by.push(sym_ref),
@@ -195,7 +215,8 @@ pub fn query_context(graph: &Graph, query: &str) -> Result<ContextResult, QueryR
     sort_refs_by_name(&mut implementors);
     sort_refs_by_name(&mut implements);
     sort_refs_by_name(&mut type_refs);
-    let mut invalidation_sources = collect_invalidation_sources(&node.id, &reads_adj, &node_index);
+    let mut invalidation_sources =
+        collect_invalidation_sources(&node.id, &reads_adj, &node_index, &locators);
     sort_refs_by_name(&mut invalidation_sources);
     sort_ids_by_span(&mut contains_ids, &node_index);
     sort_ids_by_span(&mut contained_by_ids, &node_index);
@@ -209,22 +230,23 @@ pub fn query_context(graph: &Graph, query: &str) -> Result<ContextResult, QueryR
                 &type_ref_adj,
                 &node_index,
                 &mut vec![],
+                &locators,
             )
         })
         .collect();
     let contains = contains_ids
         .into_iter()
         .filter_map(|node_id| node_index.get(node_id).copied())
-        .map(to_symbol_ref)
+        .map(|node| to_symbol_ref(node, &locators))
         .collect();
     let contained_by = contained_by_ids
         .into_iter()
         .filter_map(|node_id| node_index.get(node_id).copied())
-        .map(to_symbol_ref)
+        .map(|node| to_symbol_ref(node, &locators))
         .collect();
 
     Ok(ContextResult {
-        symbol: SymbolInfo::from_node(node),
+        symbol: SymbolInfo::from_node(node).with_locator(locators.locator_for_node(node)),
         callers,
         callees,
         reads,

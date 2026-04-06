@@ -232,7 +232,13 @@ fn format_query_error(err: &query::QueryResolveError) -> String {
         query::QueryResolveError::Ambiguous { query, candidates } => {
             let mut msg = format!("ambiguous query: {query}\n");
             for c in candidates {
-                msg.push_str(&format!("  - {} [{:?}] in {}\n", c.name, c.kind, c.file));
+                msg.push_str(&format!(
+                    "  - {} [{:?}] in {} ({})\n",
+                    c.name,
+                    c.kind,
+                    c.file,
+                    c.locator.as_deref().unwrap_or(c.id.as_str())
+                ));
             }
             msg.push_str(&format!("hint: {}", query::ambiguity_hint()));
             msg
@@ -267,7 +273,7 @@ pub fn handle_tool_call(state: &mut McpState, tool_name: &str, arguments: &Value
 
 /// Pre-resolve a symbol query using recall to break ties, returning the node ID.
 fn resolve_symbol(state: &mut McpState, query: &str) -> Result<String, Value> {
-    match recall::resolve_with_recall(&state.graph.nodes, query, &mut state.recall) {
+    match recall::resolve_with_recall(&state.graph, query, &mut state.recall) {
         Ok(node) => Ok(node.id.clone()),
         Err(e) => Err(tool_error(format_query_error(&e))),
     }

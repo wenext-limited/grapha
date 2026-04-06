@@ -79,7 +79,7 @@ fn severity_from_score(score: usize) -> &'static str {
 }
 
 pub fn query_complexity(graph: &Graph, query: &str) -> Result<ComplexityResult, QueryResolveError> {
-    let node = super::resolve_node(&graph.nodes, query)?;
+    let node = super::resolve_node(graph, query)?;
     let node_id = &node.id;
     let node_index: HashMap<&str, &Node> = graph.nodes.iter().map(|n| (n.id.as_str(), n)).collect();
 

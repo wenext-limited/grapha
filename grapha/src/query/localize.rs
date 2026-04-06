@@ -42,7 +42,7 @@ pub fn query_localize(
     catalogs: &LocalizationCatalogIndex,
     symbol: &str,
 ) -> Result<LocalizeResult, QueryResolveError> {
-    let root = resolve_node(&graph.nodes, symbol)?;
+    let root = resolve_node(graph, symbol)?;
     let node_index = node_index(graph);
     let edges_by_source = edges_by_source(graph);
     let contains_adj = contains_adjacency(graph);

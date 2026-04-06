@@ -25,6 +25,7 @@ impl RenderOptions {
             fields: FieldSet {
                 file: true,
                 id: false,
+                locator: false,
                 module: false,
                 span: false,
                 snippet: false,
@@ -41,6 +42,7 @@ impl RenderOptions {
             fields: FieldSet {
                 file: true,
                 id: false,
+                locator: false,
                 module: false,
                 span: false,
                 snippet: false,
@@ -266,6 +268,9 @@ fn symbol_info_details(symbol: &SymbolInfo, options: RenderOptions) -> Vec<TreeN
     if fields.id {
         push_detail(&mut children, "id", Some(symbol.id.clone()), options);
     }
+    if fields.locator {
+        push_detail(&mut children, "locator", symbol.locator.clone(), options);
+    }
     if fields.module {
         push_detail(&mut children, "module", symbol.module.clone(), options);
     }
@@ -317,6 +322,9 @@ fn symbol_ref_details(symbol: &SymbolRef, options: RenderOptions) -> Vec<TreeNod
     if fields.id {
         push_detail(&mut children, "id", Some(symbol.id.clone()), options);
     }
+    if fields.locator {
+        push_detail(&mut children, "locator", symbol.locator.clone(), options);
+    }
     if fields.module {
         push_detail(&mut children, "module", symbol.module.clone(), options);
     }
@@ -362,6 +370,9 @@ fn symbol_tree_ref_details(symbol: &SymbolTreeRef, options: RenderOptions) -> Ve
 
     if fields.id {
         push_detail(&mut children, "id", Some(symbol.id.clone()), options);
+    }
+    if fields.locator {
+        push_detail(&mut children, "locator", symbol.locator.clone(), options);
     }
     if fields.module {
         push_detail(&mut children, "module", symbol.module.clone(), options);
@@ -1249,6 +1260,7 @@ mod tests {
     fn symbol_ref(name: &str, kind: NodeKind, file: &str) -> SymbolRef {
         SymbolRef {
             id: format!("{file}::{name}"),
+            locator: None,
             name: name.to_string(),
             kind,
             file: file.to_string(),
@@ -1264,6 +1276,7 @@ mod tests {
     fn symbol_info(name: &str, kind: NodeKind, file: &str) -> SymbolInfo {
         SymbolInfo {
             id: format!("{file}::{name}"),
+            locator: None,
             name: name.to_string(),
             kind,
             file: file.to_string(),
@@ -1321,6 +1334,7 @@ mod tests {
             contains: vec![symbol_ref("VStack", NodeKind::View, "ContentView.swift")],
             contains_tree: vec![SymbolTreeRef {
                 id: "ContentView.swift::body::VStack".into(),
+                locator: None,
                 name: "VStack".into(),
                 kind: NodeKind::View,
                 file: "ContentView.swift".into(),
@@ -1333,6 +1347,7 @@ mod tests {
                 contains: vec![
                     SymbolTreeRef {
                         id: "ContentView.swift::body::Text".into(),
+                        locator: None,
                         name: "Text".into(),
                         kind: NodeKind::View,
                         file: "ContentView.swift".into(),
@@ -1346,6 +1361,7 @@ mod tests {
                     },
                     SymbolTreeRef {
                         id: "ContentView.swift::body::Row".into(),
+                        locator: None,
                         name: "Row".into(),
                         kind: NodeKind::View,
                         file: "ContentView.swift".into(),

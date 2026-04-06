@@ -223,7 +223,7 @@ pub fn query_reverse(
     symbol: &str,
     max_depth: Option<usize>,
 ) -> Result<ReverseResult, QueryResolveError> {
-    let target_node = crate::query::resolve_node(&graph.nodes, symbol)?;
+    let target_node = crate::query::resolve_node(graph, symbol)?;
 
     let node_index: HashMap<&str, &Node> = graph.nodes.iter().map(|n| (n.id.as_str(), n)).collect();
     let accessor_adjacency = build_accessor_adjacency(graph, &node_index);

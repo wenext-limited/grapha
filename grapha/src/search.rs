@@ -10,12 +10,14 @@ use tantivy::{Index, IndexWriter, ReloadPolicy, TantivyDocument, Term, doc};
 
 use crate::delta::{EntitySyncStats, GraphDelta, SyncMode};
 use crate::fields::FieldSet;
+use crate::symbol_locator::SymbolLocatorIndex;
 use grapha_core::graph::{EdgeKind, Graph};
 use grapha_core::graph::{Node, NodeRole};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SearchResult {
     pub id: String,
+    pub locator: String,
     pub name: String,
     pub kind: String,
     pub file: String,
@@ -64,6 +66,7 @@ impl SearchSyncStats {
 #[derive(Clone, Copy)]
 struct SearchFields {
     id: tantivy::schema::Field,
+    locator: tantivy::schema::Field,
     name: tantivy::schema::Field,
     name_lower: tantivy::schema::Field,
     kind: tantivy::schema::Field,
@@ -77,6 +80,7 @@ struct SearchFields {
 fn schema() -> (Schema, SearchFields) {
     let mut schema_builder = Schema::builder();
     let id = schema_builder.add_text_field("id", STRING | STORED);
+    let locator = schema_builder.add_text_field("locator", TEXT | STORED);
     let name = schema_builder.add_text_field("name", TEXT | STORED);
     // Lowercased, non-tokenized name for fuzzy regex matching on CamelCase symbols
     let name_lower = schema_builder.add_text_field("name_lower", STRING);
@@ -91,6 +95,7 @@ fn schema() -> (Schema, SearchFields) {
         schema_builder.build(),
         SearchFields {
             id,
+            locator,
             name,
             name_lower,
             kind,
@@ -115,7 +120,7 @@ fn role_to_string(role: &Option<NodeRole>) -> String {
     }
 }
 
-fn node_document(fields: SearchFields, node: &Node) -> Result<TantivyDocument> {
+fn node_document(fields: SearchFields, node: &Node, locator: &str) -> Result<TantivyDocument> {
     let kind_str = serde_json::to_string(&node.kind)?
         .trim_matches('"')
         .to_string();
@@ -124,6 +129,7 @@ fn node_document(fields: SearchFields, node: &Node) -> Result<TantivyDocument> {
         .to_string();
     Ok(doc!(
         fields.id => node.id.clone(),
+        fields.locator => locator.to_string(),
         fields.name => node.name.clone(),
         fields.name_lower => node.name.to_lowercase(),
         fields.kind => kind_str,
@@ -143,8 +149,9 @@ fn rebuild_index_impl(graph: &Graph, index_path: &Path) -> Result<Index> {
     let (schema, fields) = schema();
     let index = Index::create_in_dir(index_path, schema)?;
     let mut writer = index_writer(&index)?;
+    let locators = SymbolLocatorIndex::new(graph);
     for node in &graph.nodes {
-        writer.add_document(node_document(fields, node)?)?;
+        writer.add_document(node_document(fields, node, &locators.locator_for_node(node))?)?;
     }
     writer.commit()?;
     Ok(index)
@@ -180,6 +187,10 @@ pub fn sync_index(
         mode: SyncMode::Incremental,
         documents: delta.node_stats(),
     };
+    if requires_full_rebuild_for_locators(previous_graph, delta) {
+        rebuild_index_impl(graph, index_path)?;
+        return Ok(full_stats);
+    }
     let index = match Index::open_in_dir(index_path) {
         Ok(index) => index,
         Err(_) => {
@@ -196,6 +207,7 @@ pub fn sync_index(
     };
 
     let mut writer = index_writer(&index)?;
+    let locators = SymbolLocatorIndex::new(graph);
     for node_id in &delta.deleted_node_ids {
         writer.delete_term(Term::from_field_text(fields.id, node_id));
     }
@@ -208,7 +220,7 @@ pub fn sync_index(
         .copied()
         .chain(delta.updated_nodes.iter().copied())
     {
-        writer.add_document(node_document(fields, node)?)?;
+        writer.add_document(node_document(fields, node, &locators.locator_for_node(node))?)?;
     }
     writer.commit()?;
 
@@ -219,6 +231,7 @@ fn resolve_fields(index: &Index) -> Result<SearchFields> {
     let schema = index.schema();
     Ok(SearchFields {
         id: schema.get_field("id")?,
+        locator: schema.get_field("locator")?,
         name: schema.get_field("name")?,
         name_lower: schema.get_field("name_lower")?,
         kind: schema.get_field("kind")?,
@@ -258,6 +271,37 @@ fn build_fuzzy_regex(query: &str) -> String {
 
 fn normalize_file_match_input(input: &str) -> String {
     input.replace('\\', "/").to_lowercase()
+}
+
+fn tokenize_locator_query(query: &str) -> Vec<String> {
+    query
+        .split(|ch: char| !ch.is_alphanumeric())
+        .filter(|segment| !segment.is_empty())
+        .map(|segment| segment.to_lowercase())
+        .collect()
+}
+
+fn requires_full_rebuild_for_locators(previous: &Graph, delta: &GraphDelta<'_>) -> bool {
+    if delta
+        .added_edges
+        .iter()
+        .chain(delta.updated_edges.iter())
+        .any(|edge| edge.edge.kind == EdgeKind::Contains)
+    {
+        return true;
+    }
+
+    if delta.deleted_edge_ids.is_empty() {
+        return false;
+    }
+
+    previous.edges.iter().any(|edge| {
+        edge.kind == EdgeKind::Contains
+            && delta
+                .deleted_edge_ids
+                .iter()
+                .any(|deleted| deleted == &crate::delta::edge_fingerprint(edge))
+    })
 }
 
 fn has_glob_metacharacters(pattern: &str) -> bool {
@@ -311,8 +355,23 @@ pub fn search_filtered(
             &pattern,
             fields.name_lower,
         )?)
+    } else if query_str.contains("::") {
+        let terms = tokenize_locator_query(query_str);
+        let clauses: Vec<(Occur, Box<dyn tantivy::query::Query>)> = terms
+            .into_iter()
+            .map(|term| {
+                let term = Term::from_field_text(fields.locator, &term);
+                (
+                    Occur::Must,
+                    Box::new(TermQuery::new(term, IndexRecordOption::Basic))
+                        as Box<dyn tantivy::query::Query>,
+                )
+            })
+            .collect();
+        Box::new(BooleanQuery::new(clauses))
     } else {
-        let query_parser = QueryParser::for_index(index, vec![fields.name, fields.file]);
+        let query_parser =
+            QueryParser::for_index(index, vec![fields.name, fields.locator, fields.file]);
         Box::new(query_parser.parse_query(query_str)?)
     };
 
@@ -380,6 +439,7 @@ pub fn search_filtered(
         let role_val = get_str(fields.role);
         results.push(SearchResult {
             id: get_str(fields.id),
+            locator: get_str(fields.locator),
             name: get_str(fields.name),
             kind: get_str(fields.kind),
             file: file_val,
@@ -400,7 +460,30 @@ pub fn search_filtered(
         }
     }
 
+    if query_str.contains("::") {
+        let query_lower = query_str.to_lowercase();
+        results.sort_by(|left, right| {
+            locator_rank(&left.locator, &query_lower)
+                .cmp(&locator_rank(&right.locator, &query_lower))
+                .then_with(|| right.score.total_cmp(&left.score))
+                .then_with(|| left.locator.cmp(&right.locator))
+        });
+    }
+
     Ok(results)
+}
+
+fn locator_rank(locator: &str, query_lower: &str) -> usize {
+    let locator_lower = locator.to_lowercase();
+    if locator_lower == query_lower {
+        0
+    } else if locator_lower.ends_with(&format!("::{query_lower}")) {
+        1
+    } else if locator_lower.contains(query_lower) {
+        2
+    } else {
+        3
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -412,6 +495,8 @@ pub struct SearchOutputResult {
     pub file: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub locator: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub module: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -535,6 +620,7 @@ pub fn project_results(
                 score: result.score,
                 file: fields.file.then(|| result.file.clone()),
                 id: fields.id.then(|| result.id.clone()),
+                locator: fields.locator.then(|| result.locator.clone()),
                 module: if fields.module {
                     result.module.clone()
                 } else {
@@ -987,6 +1073,7 @@ mod tests {
         };
         let results = vec![SearchResult {
             id: "app::main".into(),
+            locator: "App::main.rs::main".into(),
             name: "main".into(),
             kind: "function".into(),
             file: "src/main.rs".into(),

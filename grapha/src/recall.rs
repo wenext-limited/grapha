@@ -66,11 +66,11 @@ fn base_name(query: &str) -> &str {
 /// Resolve a node, using recall to break ties on ambiguous queries.
 /// On success, records the resolution for future lookups.
 pub fn resolve_with_recall<'a>(
-    nodes: &'a [Node],
+    graph: &'a grapha_core::graph::Graph,
     query_str: &str,
     recall: &mut Recall,
 ) -> Result<&'a Node, QueryResolveError> {
-    match query::resolve_node(nodes, query_str) {
+    match query::resolve_node(graph, query_str) {
         Ok(node) => {
             recall.record(query_str, &node.id);
             Ok(node)
@@ -80,7 +80,7 @@ pub fn resolve_with_recall<'a>(
             ref candidates,
         }) => {
             if let Some(suggested_id) = recall.suggest(query, candidates)
-                && let Some(node) = nodes.iter().find(|n| n.id == suggested_id)
+                && let Some(node) = graph.nodes.iter().find(|n| n.id == suggested_id)
             {
                 recall.record(query_str, &node.id);
                 return Ok(node);
@@ -122,29 +122,33 @@ mod tests {
 
     #[test]
     fn recall_resolves_ambiguity_from_history() {
-        let nodes = vec![
-            make_node("func-a", "sendGift(req:)", NodeKind::Function, "A.swift"),
-            make_node(
-                "func-b",
-                "sendGift(goods:targetId:)",
-                NodeKind::Function,
-                "B.swift",
-            ),
-        ];
+        let graph = grapha_core::graph::Graph {
+            version: "0.1.0".to_string(),
+            nodes: vec![
+                make_node("func-a", "sendGift(req:)", NodeKind::Function, "A.swift"),
+                make_node(
+                    "func-b",
+                    "sendGift(goods:targetId:)",
+                    NodeKind::Function,
+                    "B.swift",
+                ),
+            ],
+            edges: vec![],
+        };
 
         let mut recall = Recall::new();
 
         // First call: ambiguous
-        let result = resolve_with_recall(&nodes, "sendGift", &mut recall);
+        let result = resolve_with_recall(&graph, "sendGift", &mut recall);
         assert!(result.is_err());
 
         // User disambiguates with full query
-        let result = resolve_with_recall(&nodes, "A.swift::sendGift", &mut recall);
+        let result = resolve_with_recall(&graph, "A.swift::sendGift", &mut recall);
         assert!(result.is_ok());
         assert_eq!(result.unwrap().id, "func-a");
 
         // Second call with bare name: recall resolves it
-        let result = resolve_with_recall(&nodes, "sendGift", &mut recall);
+        let result = resolve_with_recall(&graph, "sendGift", &mut recall);
         assert!(result.is_ok());
         assert_eq!(result.unwrap().id, "func-a");
     }

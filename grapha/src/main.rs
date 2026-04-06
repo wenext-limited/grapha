@@ -18,6 +18,7 @@ mod search;
 mod serve;
 mod snippet;
 mod store;
+mod symbol_locator;
 mod watch;
 
 use std::path::{Path, PathBuf};
@@ -191,7 +192,7 @@ enum SymbolCommands {
         /// Include source snippet and relationships in results
         #[arg(long)]
         context: bool,
-        /// Fields to display (comma-separated: file,id,module,span,snippet,visibility,signature,role; or "full"/"all"/"none")
+        /// Fields to display (comma-separated: file,id,locator,module,span,snippet,visibility,signature,role; or "full"/"all"/"none")
         #[arg(long)]
         fields: Option<String>,
     },
@@ -205,7 +206,7 @@ enum SymbolCommands {
         /// Output format
         #[arg(long, value_enum, default_value_t = QueryOutputFormat::Json)]
         format: QueryOutputFormat,
-        /// Fields to display (comma-separated: file,id,module,span,snippet,visibility,signature,role; or "full"/"all"/"none")
+        /// Fields to display (comma-separated: file,id,locator,module,span,snippet,visibility,signature,role; or "full"/"all"/"none")
         #[arg(long)]
         fields: Option<String>,
     },
@@ -222,7 +223,7 @@ enum SymbolCommands {
         /// Output format
         #[arg(long, value_enum, default_value_t = QueryOutputFormat::Json)]
         format: QueryOutputFormat,
-        /// Fields to display (comma-separated: file,id,module,span,snippet,visibility,signature,role; or "full"/"all"/"none")
+        /// Fields to display (comma-separated: file,id,locator,module,span,snippet,visibility,signature,role; or "full"/"all"/"none")
         #[arg(long)]
         fields: Option<String>,
     },
@@ -765,7 +766,10 @@ fn format_ambiguity_error(query: &str, candidates: &[query::QueryCandidate]) -> 
             candidate.name,
             kind_label(candidate.kind),
             candidate.file,
-            candidate.id
+            candidate
+                .locator
+                .as_deref()
+                .unwrap_or(candidate.id.as_str())
         ));
     }
     message.push_str(&format!("hint: {}", query::ambiguity_hint()));
@@ -805,7 +809,7 @@ fn resolve_field_set(fields_flag: &Option<String>, path: &Path) -> fields::Field
 fn resolve_search_field_set(fields_flag: &Option<String>, path: &Path) -> fields::FieldSet {
     match fields_flag {
         Some(_) => resolve_field_set(fields_flag, path),
-        None => resolve_field_set(fields_flag, path).with_id(),
+        None => resolve_field_set(fields_flag, path).with_id().with_locator(),
     }
 }
 

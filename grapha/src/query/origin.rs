@@ -709,7 +709,7 @@ fn query_origin_with_limits(
     max_explored_states: usize,
     max_origins: usize,
 ) -> Result<OriginResult, QueryResolveError> {
-    let root_node = crate::query::resolve_node(&graph.nodes, symbol)?;
+    let root_node = crate::query::resolve_node(graph, symbol)?;
     let node_index: HashMap<&str, &Node> = graph.nodes.iter().map(|n| (n.id.as_str(), n)).collect();
     let mut contains_parent: HashMap<&str, &str> = HashMap::new();
     for edge in &graph.edges {
@@ -1527,6 +1527,7 @@ mod tests {
                 OriginPath {
                     api: SymbolRef {
                         id: "net".to_string(),
+                        locator: None,
                         name: "requestGetUser".to_string(),
                         kind: NodeKind::Function,
                         file: "ProfileService.swift".to_string(),
@@ -1550,6 +1551,7 @@ mod tests {
                 OriginPath {
                     api: SymbolRef {
                         id: "persist".to_string(),
+                        locator: None,
                         name: "getter:uid".to_string(),
                         kind: NodeKind::Function,
                         file: "AppContext.swift".to_string(),
@@ -1575,6 +1577,7 @@ mod tests {
             truncated: false,
             target_ref: SymbolRef {
                 id: "symbol".to_string(),
+                locator: None,
                 name: "fetchUserInfo".to_string(),
                 kind: NodeKind::Function,
                 file: "UserAPI.swift".to_string(),
@@ -1600,6 +1603,7 @@ mod tests {
             origins: vec![OriginPath {
                 api: SymbolRef {
                     id: "net".to_string(),
+                    locator: None,
                     name: "requestGetUser".to_string(),
                     kind: NodeKind::Function,
                     file: "ProfileService.swift".to_string(),
@@ -1616,6 +1620,7 @@ mod tests {
                 code_snippets: vec![OriginSnippet {
                     symbol: SymbolRef {
                         id: "leaf".to_string(),
+                        locator: None,
                         name: "requestGetUser".to_string(),
                         kind: NodeKind::Function,
                         file: "ProfileService.swift".to_string(),
@@ -1639,6 +1644,7 @@ mod tests {
             truncated: false,
             target_ref: SymbolRef {
                 id: "symbol".to_string(),
+                locator: None,
                 name: "fetchUserInfo".to_string(),
                 kind: NodeKind::Function,
                 file: "UserAPI.swift".to_string(),
@@ -1780,6 +1786,7 @@ mod tests {
             OriginPath {
                 api: SymbolRef {
                     id: "a".to_string(),
+                    locator: None,
                     name: "_getUser(ids:attrs:)".to_string(),
                     kind: NodeKind::Function,
                     file: "ProfileService.swift".to_string(),
@@ -1808,6 +1815,7 @@ mod tests {
             OriginPath {
                 api: SymbolRef {
                     id: "b".to_string(),
+                    locator: None,
                     name: "_getUser(sids:attrs:)".to_string(),
                     kind: NodeKind::Function,
                     file: "ProfileService.swift".to_string(),
@@ -1846,6 +1854,7 @@ mod tests {
             OriginPath {
                 api: SymbolRef {
                     id: "request".to_string(),
+                    locator: None,
                     name: "requestGetUser(_:)".to_string(),
                     kind: NodeKind::Function,
                     file: "ProfileService.swift".to_string(),
@@ -1873,6 +1882,7 @@ mod tests {
             OriginPath {
                 api: SymbolRef {
                     id: "wrapper".to_string(),
+                    locator: None,
                     name: "withRequestErrorThrowing(_:)".to_string(),
                     kind: NodeKind::Function,
                     file: "ProfileService.swift".to_string(),

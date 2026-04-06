@@ -2,6 +2,8 @@ use serde::Serialize;
 
 use grapha_core::graph::{Graph, NodeKind};
 
+use crate::symbol_locator::SymbolLocatorIndex;
+
 use super::SymbolRef;
 
 #[derive(Debug, Serialize)]
@@ -33,6 +35,7 @@ fn role_string(node: &grapha_core::graph::Node) -> Option<String> {
 }
 
 pub fn query_file_symbols(graph: &Graph, file_query: &str) -> FileSymbolsResult {
+    let locators = SymbolLocatorIndex::new(graph);
     let mut symbols: Vec<FileSymbol> = graph
         .nodes
         .iter()
@@ -42,7 +45,7 @@ pub fn query_file_symbols(graph: &Graph, file_query: &str) -> FileSymbolsResult 
         })
         .filter(|node| !matches!(node.kind, NodeKind::View | NodeKind::Branch))
         .map(|node| FileSymbol {
-            symbol: SymbolRef::from_node(node),
+            symbol: SymbolRef::from_node(node).with_locator(locators.locator_for_node(node)),
             module: node.module.clone(),
             role: role_string(node),
             span: [node.span.start[0], node.span.end[0]],

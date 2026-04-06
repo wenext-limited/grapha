@@ -6,6 +6,7 @@
 pub struct FieldSet {
     pub file: bool,
     pub id: bool,
+    pub locator: bool,
     pub module: bool,
     pub span: bool,
     pub snippet: bool,
@@ -19,6 +20,7 @@ impl Default for FieldSet {
         Self {
             file: true,
             id: false,
+            locator: false,
             module: false,
             span: false,
             snippet: false,
@@ -35,10 +37,16 @@ impl FieldSet {
         self
     }
 
+    pub fn with_locator(mut self) -> Self {
+        self.locator = true;
+        self
+    }
+
     pub fn all() -> Self {
         Self {
             file: true,
             id: true,
+            locator: true,
             module: true,
             span: true,
             snippet: true,
@@ -52,6 +60,7 @@ impl FieldSet {
         Self {
             file: false,
             id: false,
+            locator: false,
             module: false,
             span: false,
             snippet: false,
@@ -71,6 +80,7 @@ impl FieldSet {
                     match field.trim() {
                         "file" => fs.file = true,
                         "id" => fs.id = true,
+                        "locator" => fs.locator = true,
                         "module" => fs.module = true,
                         "span" => fs.span = true,
                         "snippet" => fs.snippet = true,

@@ -390,7 +390,7 @@ pub fn query_dataflow(
     entry: &str,
     max_depth: usize,
 ) -> Result<DataflowResult, QueryResolveError> {
-    let entry_node = crate::query::resolve_node(&graph.nodes, entry)?;
+    let entry_node = crate::query::resolve_node(graph, entry)?;
 
     // If the resolved node is a type (struct/enum/protocol), it won't have
     // outgoing dataflow edges. Suggest its member functions instead.

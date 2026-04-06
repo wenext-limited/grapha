@@ -71,7 +71,7 @@ pub fn query_impact(
     symbol: &str,
     max_depth: usize,
 ) -> Result<ImpactResult, QueryResolveError> {
-    let node = crate::query::resolve_node(&graph.nodes, symbol)?;
+    let node = crate::query::resolve_node(graph, symbol)?;
 
     let node_index: HashMap<&str, &grapha_core::graph::Node> =
         graph.nodes.iter().map(|n| (n.id.as_str(), n)).collect();
