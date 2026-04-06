@@ -69,6 +69,7 @@ struct SearchFields {
     locator: tantivy::schema::Field,
     name: tantivy::schema::Field,
     name_lower: tantivy::schema::Field,
+    search_terms: Option<tantivy::schema::Field>,
     kind: tantivy::schema::Field,
     file: tantivy::schema::Field,
     module: tantivy::schema::Field,
@@ -84,6 +85,7 @@ fn schema() -> (Schema, SearchFields) {
     let name = schema_builder.add_text_field("name", TEXT | STORED);
     // Lowercased, non-tokenized name for fuzzy regex matching on CamelCase symbols
     let name_lower = schema_builder.add_text_field("name_lower", STRING);
+    let search_terms = schema_builder.add_text_field("search_terms", TEXT);
     let kind = schema_builder.add_text_field("kind", STRING | STORED);
     let file = schema_builder.add_text_field("file", TEXT | STORED);
     let module = schema_builder.add_text_field("module", STRING | STORED);
@@ -98,6 +100,7 @@ fn schema() -> (Schema, SearchFields) {
             locator,
             name,
             name_lower,
+            search_terms: Some(search_terms),
             kind,
             file,
             module,
@@ -127,7 +130,7 @@ fn node_document(fields: SearchFields, node: &Node, locator: &str) -> Result<Tan
     let visibility_str = serde_json::to_string(&node.visibility)?
         .trim_matches('"')
         .to_string();
-    Ok(doc!(
+    let mut document = doc!(
         fields.id => node.id.clone(),
         fields.locator => locator.to_string(),
         fields.name => node.name.clone(),
@@ -138,7 +141,14 @@ fn node_document(fields: SearchFields, node: &Node, locator: &str) -> Result<Tan
         fields.module_lower => node.module.as_deref().unwrap_or("").to_lowercase(),
         fields.visibility => visibility_str,
         fields.role => role_to_string(&node.role),
-    ))
+    );
+    if let Some(search_terms_field) = fields.search_terms {
+        document.add_text(
+            search_terms_field,
+            search_terms_text(&node.name, locator, &node.file.to_string_lossy()),
+        );
+    }
+    Ok(document)
 }
 
 fn rebuild_index_impl(graph: &Graph, index_path: &Path) -> Result<Index> {
@@ -242,6 +252,7 @@ fn resolve_fields(index: &Index) -> Result<SearchFields> {
         locator: schema.get_field("locator")?,
         name: schema.get_field("name")?,
         name_lower: schema.get_field("name_lower")?,
+        search_terms: schema.get_field("search_terms").ok(),
         kind: schema.get_field("kind")?,
         file: schema.get_field("file")?,
         module: schema.get_field("module")?,
@@ -287,6 +298,82 @@ fn tokenize_locator_query(query: &str) -> Vec<String> {
         .filter(|segment| !segment.is_empty())
         .map(|segment| segment.to_lowercase())
         .collect()
+}
+
+fn tokenize_search_terms(input: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut previous: Option<char> = None;
+
+    for ch in input.chars() {
+        if !ch.is_ascii_alphanumeric() {
+            if !current.is_empty() {
+                tokens.push(std::mem::take(&mut current));
+            }
+            previous = None;
+            continue;
+        }
+
+        let starts_new_token = previous.is_some_and(|prev| {
+            (prev.is_ascii_lowercase() && ch.is_ascii_uppercase())
+                || (prev.is_ascii_alphabetic() && ch.is_ascii_digit())
+                || (prev.is_ascii_digit() && ch.is_ascii_alphabetic())
+        });
+        if starts_new_token && !current.is_empty() {
+            tokens.push(std::mem::take(&mut current));
+        }
+
+        current.push(ch.to_ascii_lowercase());
+        previous = Some(ch);
+    }
+
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+
+    tokens.sort();
+    tokens.dedup();
+    tokens
+}
+
+fn search_terms_text(name: &str, locator: &str, file: &str) -> String {
+    let mut tokens = tokenize_search_terms(name);
+    tokens.extend(tokenize_search_terms(locator));
+    tokens.extend(tokenize_search_terms(file));
+    tokens.sort();
+    tokens.dedup();
+    tokens.join(" ")
+}
+
+fn identifier_like_query(query: &str) -> bool {
+    !query.is_empty()
+        && query
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/'))
+}
+
+fn search_terms_query(
+    fields: SearchFields,
+    query_str: &str,
+) -> Option<Box<dyn tantivy::query::Query>> {
+    let search_terms_field = fields.search_terms?;
+    let terms = tokenize_search_terms(query_str);
+    if terms.len() < 2 {
+        return None;
+    }
+
+    let clauses: Vec<(Occur, Box<dyn tantivy::query::Query>)> = terms
+        .into_iter()
+        .map(|term| {
+            let term = Term::from_field_text(search_terms_field, &term);
+            (
+                Occur::Must,
+                Box::new(TermQuery::new(term, IndexRecordOption::Basic))
+                    as Box<dyn tantivy::query::Query>,
+            )
+        })
+        .collect();
+    Some(Box::new(BooleanQuery::new(clauses)))
 }
 
 fn requires_full_rebuild_for_locators(previous: &Graph, delta: &GraphDelta<'_>) -> bool {
@@ -380,7 +467,20 @@ pub fn search_filtered(
     } else {
         let query_parser =
             QueryParser::for_index(index, vec![fields.name, fields.locator, fields.file]);
-        Box::new(query_parser.parse_query(query_str)?)
+        let exact_query =
+            Box::new(query_parser.parse_query(query_str)?) as Box<dyn tantivy::query::Query>;
+        if identifier_like_query(query_str) {
+            if let Some(token_query) = search_terms_query(fields, query_str) {
+                Box::new(BooleanQuery::new(vec![
+                    (Occur::Should, exact_query),
+                    (Occur::Should, token_query),
+                ]))
+            } else {
+                exact_query
+            }
+        } else {
+            exact_query
+        }
     };
 
     let mut clauses: Vec<(Occur, Box<dyn tantivy::query::Query>)> = vec![(Occur::Must, text_query)];
@@ -934,6 +1034,65 @@ mod tests {
         assert_eq!(
             results.first().map(|result| result.kind.as_str()),
             Some("class")
+        );
+    }
+
+    #[test]
+    fn identifier_search_matches_token_equivalent_wrapper_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let graph = Graph {
+            version: "0.1.0".to_string(),
+            nodes: vec![
+                Node {
+                    id: "AppUI/Sources/AppResource/Generated/Strings.generated.swift::L10n::commonuiListSearchEmpty".into(),
+                    kind: NodeKind::Property,
+                    name: "commonuiListSearchEmpty".into(),
+                    file: "AppUI/Sources/AppResource/Generated/Strings.generated.swift".into(),
+                    span: Span {
+                        start: [0, 0],
+                        end: [1, 0],
+                    },
+                    visibility: Visibility::Public,
+                    metadata: HashMap::new(),
+                    role: None,
+                    signature: None,
+                    doc_comment: None,
+                    module: Some("AppUI".into()),
+                    snippet: None,
+                },
+                Node {
+                    id: "AppUI/Sources/AppResource/Generated/Strings.generated.swift::L10n::roomShareNoFriedns".into(),
+                    kind: NodeKind::Property,
+                    name: "roomShareNoFriedns".into(),
+                    file: "AppUI/Sources/AppResource/Generated/Strings.generated.swift".into(),
+                    span: Span {
+                        start: [2, 0],
+                        end: [3, 0],
+                    },
+                    visibility: Visibility::Public,
+                    metadata: HashMap::new(),
+                    role: None,
+                    signature: None,
+                    doc_comment: None,
+                    module: Some("AppUI".into()),
+                    snippet: None,
+                },
+            ],
+            edges: vec![],
+        };
+        let index = build_index(&graph, dir.path()).unwrap();
+
+        let results = search(&index, "commonuiSearchListEmpty", 10).unwrap();
+
+        assert!(
+            results
+                .iter()
+                .any(|result| result.name == "commonuiListSearchEmpty"),
+            "tokenized identifier search should find the real generated wrapper, got: {:?}",
+            results
+                .iter()
+                .map(|result| &result.name)
+                .collect::<Vec<_>>()
         );
     }
 
