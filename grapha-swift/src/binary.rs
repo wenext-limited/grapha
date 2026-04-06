@@ -118,6 +118,7 @@ fn read_str(string_table: &[u8], offset: u32, len: u32) -> Option<&str> {
 fn decode_node_kind(v: u8) -> Option<NodeKind> {
     match v {
         0 => Some(NodeKind::Function),
+        9 => Some(NodeKind::Class),
         1 => Some(NodeKind::Struct),
         2 => Some(NodeKind::Enum),
         3 => Some(NodeKind::Protocol),

@@ -473,12 +473,26 @@ pub fn search_filtered(
         results.sort_by(|left, right| {
             locator_rank(&left.locator, &query_lower)
                 .cmp(&locator_rank(&right.locator, &query_lower))
+                .then_with(|| search_kind_rank(&left.kind).cmp(&search_kind_rank(&right.kind)))
                 .then_with(|| right.score.total_cmp(&left.score))
                 .then_with(|| left.locator.cmp(&right.locator))
         });
     }
 
     Ok(results)
+}
+
+fn search_kind_rank(kind: &str) -> usize {
+    match kind {
+        "function" => 0,
+        "property" => 1,
+        "variant" | "field" => 2,
+        "class" | "struct" | "enum" | "trait" | "module" | "constant" | "type_alias"
+        | "protocol" => 3,
+        "impl" | "extension" => 4,
+        "view" | "branch" => 5,
+        _ => 6,
+    }
 }
 
 fn locator_rank(locator: &str, query_lower: &str) -> usize {
@@ -790,6 +804,40 @@ mod tests {
         }
     }
 
+    fn make_locator_tiebreak_graph() -> Graph {
+        let mk = |id: &str, name: &str, kind: NodeKind, file: &str| Node {
+            id: id.into(),
+            kind,
+            name: name.into(),
+            file: file.into(),
+            span: Span {
+                start: [0, 0],
+                end: [1, 0],
+            },
+            visibility: Visibility::Public,
+            metadata: HashMap::new(),
+            role: None,
+            signature: None,
+            doc_comment: None,
+            module: Some("ModuleExport".into()),
+            snippet: None,
+        };
+
+        Graph {
+            version: "0.1.0".to_string(),
+            nodes: vec![
+                mk("Hello.swift::Test", "Test", NodeKind::Class, "Hello.swift"),
+                mk(
+                    "Hello.swift::ext_Test",
+                    "Test",
+                    NodeKind::Extension,
+                    "Hello.swift",
+                ),
+            ],
+            edges: vec![],
+        }
+    }
+
     #[test]
     fn search_finds_by_name() {
         let dir = tempfile::tempdir().unwrap();
@@ -873,6 +921,20 @@ mod tests {
         let results = search(&index, "Config", 10).unwrap();
         assert!(!results.is_empty());
         assert!(results.iter().any(|r| r.name == "Config"));
+    }
+
+    #[test]
+    fn locator_search_prefers_concrete_type_over_extension_on_ties() {
+        let dir = tempfile::tempdir().unwrap();
+        let graph = make_locator_tiebreak_graph();
+        let index = build_index(&graph, dir.path()).unwrap();
+        let results =
+            search_filtered(&index, "Hello.swift::Test", 10, &SearchOptions::default()).unwrap();
+
+        assert_eq!(
+            results.first().map(|result| result.kind.as_str()),
+            Some("class")
+        );
     }
 
     #[test]

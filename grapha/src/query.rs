@@ -81,7 +81,8 @@ fn kind_preference(kind: NodeKind) -> usize {
         NodeKind::Function => 0,
         NodeKind::Property => 1,
         NodeKind::Variant | NodeKind::Field => 2,
-        NodeKind::Struct
+        NodeKind::Class
+        | NodeKind::Struct
         | NodeKind::Enum
         | NodeKind::Trait
         | NodeKind::Module

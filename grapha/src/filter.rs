@@ -8,6 +8,7 @@ pub fn parse_filter(filter: &str) -> anyhow::Result<HashSet<NodeKind>> {
     for part in filter.split(',') {
         let kind = match part.trim() {
             "fn" | "function" => NodeKind::Function,
+            "class" => NodeKind::Class,
             "struct" => NodeKind::Struct,
             "enum" => NodeKind::Enum,
             "trait" => NodeKind::Trait,

@@ -317,6 +317,7 @@ impl SqliteStore {
 fn node_kind_str(k: &NodeKind) -> &'static str {
     match k {
         NodeKind::Function => "function",
+        NodeKind::Class => "class",
         NodeKind::Struct => "struct",
         NodeKind::Enum => "enum",
         NodeKind::Trait => "trait",

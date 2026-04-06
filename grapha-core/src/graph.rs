@@ -6,6 +6,7 @@ use std::path::PathBuf;
 #[serde(rename_all = "snake_case")]
 pub enum NodeKind {
     Function,
+    Class,
     Struct,
     Enum,
     Trait,
@@ -156,6 +157,9 @@ mod tests {
     fn node_kind_serializes_as_snake_case() {
         let json = serde_json::to_string(&NodeKind::Function).unwrap();
         assert_eq!(json, "\"function\"");
+
+        let json = serde_json::to_string(&NodeKind::Class).unwrap();
+        assert_eq!(json, "\"class\"");
 
         let json = serde_json::to_string(&NodeKind::Struct).unwrap();
         assert_eq!(json, "\"struct\"");

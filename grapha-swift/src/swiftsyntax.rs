@@ -75,7 +75,7 @@ mod tests {
 
         let config = find_node(&result, "Config", NodeKind::Struct);
         let configurable = find_node(&result, "Configurable", NodeKind::Protocol);
-        let app_delegate = find_node(&result, "AppDelegate", NodeKind::Struct);
+        let app_delegate = find_node(&result, "AppDelegate", NodeKind::Class);
         let launch = find_node(&result, "launch", NodeKind::Function);
         let default_config = find_node(&result, "defaultConfig", NodeKind::Function);
         let theme = find_node(&result, "Theme", NodeKind::Enum);
@@ -122,7 +122,7 @@ mod tests {
         let result = extract_with_swiftsyntax(source.as_bytes(), fixture_path())
             .expect("SwiftSyntax extraction should succeed");
 
-        let worker = find_node(&result, "Worker", NodeKind::Struct);
+        let worker = find_node(&result, "Worker", NodeKind::Class);
         let extension_node = result
             .nodes
             .iter()

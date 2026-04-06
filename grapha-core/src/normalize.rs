@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::graph::{Edge, EdgeKind, FlowDirection, Graph, Node, Visibility};
+use crate::graph::{Edge, EdgeKind, FlowDirection, Graph, Node, NodeKind, Visibility};
 
 pub fn normalize_graph(mut graph: Graph) -> Graph {
     fn visibility_rank(visibility: &Visibility) -> u8 {
@@ -11,7 +11,15 @@ pub fn normalize_graph(mut graph: Graph) -> Graph {
         }
     }
 
+    fn merged_kind(existing: NodeKind, incoming: NodeKind) -> NodeKind {
+        match (existing, incoming) {
+            (NodeKind::Struct, NodeKind::Class) => NodeKind::Class,
+            _ => existing,
+        }
+    }
+
     fn merge_node(existing: &mut Node, incoming: Node) {
+        existing.kind = merged_kind(existing.kind, incoming.kind);
         if visibility_rank(&incoming.visibility) > visibility_rank(&existing.visibility) {
             existing.visibility = incoming.visibility;
         }
@@ -266,6 +274,54 @@ mod tests {
         );
         assert_eq!(normalized.nodes[0].doc_comment.as_deref(), Some("helper"));
         assert_eq!(normalized.nodes[0].module.as_deref(), Some("Room"));
+    }
+
+    #[test]
+    fn normalize_graph_prefers_class_over_struct_for_same_symbol() {
+        let graph = Graph {
+            version: "0.1.0".to_string(),
+            nodes: vec![
+                Node {
+                    id: "AppDelegate".to_string(),
+                    kind: NodeKind::Struct,
+                    name: "AppDelegate".to_string(),
+                    file: PathBuf::from("AppDelegate.swift"),
+                    span: Span {
+                        start: [0, 0],
+                        end: [1, 0],
+                    },
+                    visibility: Visibility::Crate,
+                    metadata: HashMap::new(),
+                    role: None,
+                    signature: None,
+                    doc_comment: None,
+                    module: None,
+                    snippet: None,
+                },
+                Node {
+                    id: "AppDelegate".to_string(),
+                    kind: NodeKind::Class,
+                    name: "AppDelegate".to_string(),
+                    file: PathBuf::from("AppDelegate.swift"),
+                    span: Span {
+                        start: [0, 0],
+                        end: [1, 0],
+                    },
+                    visibility: Visibility::Crate,
+                    metadata: HashMap::new(),
+                    role: None,
+                    signature: None,
+                    doc_comment: None,
+                    module: None,
+                    snippet: None,
+                },
+            ],
+            edges: vec![],
+        };
+
+        let normalized = normalize_graph(graph);
+        assert_eq!(normalized.nodes.len(), 1);
+        assert_eq!(normalized.nodes[0].kind, NodeKind::Class);
     }
 
     #[test]

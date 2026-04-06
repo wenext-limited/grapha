@@ -204,6 +204,7 @@ impl<'a> LineIndex<'a> {
                     || trimmed.contains("subscript")
                     || trimmed.contains("var ")
             }
+            NodeKind::Class => trimmed.contains("class "),
             NodeKind::Property | NodeKind::Field | NodeKind::Constant => {
                 trimmed.contains("var ") || trimmed.contains("let ")
             }
@@ -359,6 +360,7 @@ fn declaration_matches_symbol(line: &str, symbol: &str, kind: NodeKind) -> bool 
                 || line.contains("subscript")
                 || line.contains("var ")
         }
+        NodeKind::Class => line.contains("class "),
         NodeKind::Property | NodeKind::Field | NodeKind::Constant => {
             line.contains("var ") || line.contains("let ")
         }

@@ -30,7 +30,8 @@ fn to_symbol_ref(node: &Node) -> SymbolRef {
 fn is_type_node(kind: NodeKind) -> bool {
     matches!(
         kind,
-        NodeKind::Struct
+        NodeKind::Class
+            | NodeKind::Struct
             | NodeKind::Enum
             | NodeKind::Trait
             | NodeKind::Protocol

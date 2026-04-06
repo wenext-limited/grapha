@@ -298,7 +298,7 @@ fn walk_node(
                         file,
                         module_path,
                         parent_id,
-                        NodeKind::Struct,
+                        NodeKind::Class,
                         result,
                     );
                 }
@@ -1177,7 +1177,7 @@ fn extract_calls_from_text(
             result.edges.push(Edge {
                 source: caller_id.to_string(),
                 target: target_id,
-                kind: EdgeKind::Calls,
+                kind: EdgeKind::Reads,
                 confidence: 0.5,
                 direction: None,
                 operation: Some(prefix),
@@ -1777,7 +1777,7 @@ fn extract_nav_prefix(node: tree_sitter::Node, source: &[u8]) -> Option<String> 
 }
 
 /// Recursively scan for `call_expression` and `navigation_expression` nodes,
-/// emitting Calls edges for function calls and TypeRef edges for property accesses.
+/// emitting Calls edges for function calls and Reads edges for property accesses.
 fn extract_calls(
     node: tree_sitter::Node,
     source: &[u8],
@@ -1806,8 +1806,8 @@ fn extract_calls(
     }
 
     // Property access: `foo.bar` generates a navigation_expression.
-    // Emit a Calls edge so that property reads appear in the graph
-    // and impact analysis can trace through them.
+    // Emit a Reads edge so dependency queries can trace through the access
+    // without polluting call lists with field-like symbols.
     // Skip if the parent is a call_expression (already handled above as the callee name).
     if node.kind() == "navigation_expression"
         && !matches!(node.parent().map(|p| p.kind()), Some("call_expression"))
@@ -1830,7 +1830,7 @@ fn extract_calls(
             result.edges.push(Edge {
                 source: caller_id.to_string(),
                 target: target_id,
-                kind: EdgeKind::Calls,
+                kind: EdgeKind::Reads,
                 confidence: 0.6,
                 direction: None,
                 operation: prefix,
@@ -1971,6 +1971,10 @@ fn dependency_read_name(
         return None;
     }
 
+    if is_syntactic_argument_label(node, source) {
+        return None;
+    }
+
     let name = node.utf8_text(source).ok()?.trim().to_string();
     if name.is_empty() || name == "_" || uppercase_identifier(&name) {
         return None;
@@ -1987,6 +1991,48 @@ fn dependency_read_name(
     }
 
     Some(name)
+}
+
+fn is_syntactic_argument_label(node: tree_sitter::Node, source: &[u8]) -> bool {
+    let mut cursor = node.parent();
+    let mut inside_call_syntax = false;
+    while let Some(parent) = cursor {
+        if matches!(
+            parent.kind(),
+            "value_argument"
+                | "value_arguments"
+                | "call_suffix"
+                | "call_expression"
+                | "navigation_suffix"
+                | "navigation_expression"
+        ) {
+            inside_call_syntax = true;
+            break;
+        }
+        if matches!(
+            parent.kind(),
+            "function_declaration"
+                | "protocol_function_declaration"
+                | "init_declaration"
+                | "closure_parameter"
+                | "parameter"
+        ) {
+            break;
+        }
+        cursor = parent.parent();
+    }
+
+    if !inside_call_syntax {
+        return false;
+    }
+
+    let remaining = &source[node.end_byte()..];
+    let offset = remaining
+        .iter()
+        .position(|b| !b.is_ascii_whitespace())
+        .unwrap_or(remaining.len());
+
+    remaining.get(offset).copied() == Some(b':')
 }
 
 fn emit_dependency_read(
@@ -3711,7 +3757,7 @@ mod tests {
     fn extracts_class() {
         let result = extract("public class AppDelegate { }");
         let node = find_node(&result, "AppDelegate");
-        assert_eq!(node.kind, NodeKind::Struct); // classes map to Struct in our model
+        assert_eq!(node.kind, NodeKind::Class);
         assert_eq!(node.visibility, Visibility::Public);
     }
 
@@ -3880,6 +3926,31 @@ mod tests {
             "call edges should carry provenance"
         );
         assert_eq!(call_edge.provenance[0].symbol_id, "test.swift::launch");
+    }
+
+    #[test]
+    fn property_accesses_become_reads_not_calls() {
+        let result = extract(
+            r#"
+            struct Model { let value: Int }
+            func launch(model: Model) {
+                let current = model.value
+            }
+            "#,
+        );
+
+        assert!(has_edge(
+            &result,
+            "test.swift::launch",
+            "test.swift::value",
+            EdgeKind::Reads,
+        ));
+        assert!(!has_edge(
+            &result,
+            "test.swift::launch",
+            "test.swift::value",
+            EdgeKind::Calls,
+        ));
     }
 
     #[test]
@@ -4366,6 +4437,65 @@ mod tests {
         assert!(has_read("test.swift::RoomPage::roomMode"));
         assert!(has_read("test.swift::RoomPage::luckyGameType"));
         assert!(has_read("test.swift::RoomPage::minimizeGameRoom"));
+    }
+
+    #[test]
+    fn skips_argument_labels_when_enriching_property_reads() {
+        let result = extract_with_localization(
+            r#"
+            import SwiftUI
+
+            struct GeneralButtonType {
+                let type: Int
+            }
+
+            struct AudioButton {
+                let label: String
+            }
+
+            struct LoginPage: View {
+                @State private var isNextValid = false
+
+                private var loginButton: some View {
+                    Button {
+                    } label: {
+                        Text("Login")
+                    }
+                    .buttonStyle(.app(type: .yellowH112))
+                    .disabled(isNextValid.negated)
+                }
+
+                var body: some View { loginButton }
+            }
+            "#,
+        );
+        let graph = grapha_core::merge(vec![result]);
+
+        let read_targets: Vec<_> = graph
+            .edges
+            .iter()
+            .filter(|edge| {
+                edge.source == "test.swift::LoginPage::loginButton" && edge.kind == EdgeKind::Reads
+            })
+            .map(|edge| edge.target.as_str())
+            .collect();
+
+        assert!(
+            read_targets.contains(&"test.swift::LoginPage::isNextValid"),
+            "real property reads should still be preserved"
+        );
+        assert!(
+            read_targets
+                .iter()
+                .all(|target| !target.ends_with("::label")),
+            "trailing closure labels should not become dependency reads: {read_targets:?}"
+        );
+        assert!(
+            read_targets
+                .iter()
+                .all(|target| !target.ends_with("::type")),
+            "named argument labels should not become dependency reads: {read_targets:?}"
+        );
     }
 
     #[test]

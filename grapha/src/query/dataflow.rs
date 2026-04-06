@@ -396,7 +396,11 @@ pub fn query_dataflow(
     // outgoing dataflow edges. Suggest its member functions instead.
     if matches!(
         entry_node.kind,
-        NodeKind::Struct | NodeKind::Enum | NodeKind::Protocol | NodeKind::Extension
+        NodeKind::Class
+            | NodeKind::Struct
+            | NodeKind::Enum
+            | NodeKind::Protocol
+            | NodeKind::Extension
     ) {
         let members: Vec<&str> = graph
             .edges

@@ -380,7 +380,7 @@ private func mapSymbolKind(_ raw: UInt64) -> UInt8? {
     switch raw {
     case 5:  return 2   // enum
     case 6:  return 1   // struct
-    case 7:  return 1   // Class → struct in grapha
+    case 7:  return 9   // class
     case 8:  return 3   // protocol
     case 9:  return 4   // extension
     case 11: return 5   // type_alias

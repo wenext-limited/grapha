@@ -16,6 +16,7 @@ struct BridgeNodeRole: Encodable {
 
 enum BridgeNodeKind: String, Encodable {
     case function
+    case `class`
     case `struct`
     case `enum`
     case `protocol`
@@ -278,7 +279,7 @@ private final class SwiftSyntaxExtractor {
         if let node = decl.as(ClassDeclSyntax.self) {
             processNominal(
                 name: normalizeIdentifier(node.name.text),
-                kind: .struct,
+                kind: .class,
                 syntax: Syntax(node),
                 modifiers: node.modifiers,
                 attributes: node.attributes,
