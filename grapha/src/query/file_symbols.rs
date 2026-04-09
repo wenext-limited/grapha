@@ -4,7 +4,7 @@ use grapha_core::graph::{Graph, NodeKind};
 
 use crate::symbol_locator::SymbolLocatorIndex;
 
-use super::SymbolRef;
+use super::{SymbolRef, file_matches_query_path};
 
 #[derive(Debug, Serialize)]
 pub struct FileSymbolsResult {
@@ -39,10 +39,7 @@ pub fn query_file_symbols(graph: &Graph, file_query: &str) -> FileSymbolsResult 
     let mut symbols: Vec<FileSymbol> = graph
         .nodes
         .iter()
-        .filter(|node| {
-            let file_str = node.file.to_string_lossy();
-            file_str.ends_with(file_query) || file_str.contains(file_query)
-        })
+        .filter(|node| file_matches_query_path(&node.file, file_query))
         .filter(|node| !matches!(node.kind, NodeKind::View | NodeKind::Branch))
         .map(|node| FileSymbol {
             symbol: SymbolRef::from_node(node).with_locator(locators.locator_for_node(node)),
@@ -110,6 +107,22 @@ mod tests {
         // Same span, so sorted by name: Baz < Foo
         assert_eq!(result.symbols[0].symbol.name, "Baz");
         assert_eq!(result.symbols[1].symbol.name, "Foo");
+    }
+
+    #[test]
+    fn matches_repo_relative_query_when_graph_stores_basename() {
+        let graph = Graph {
+            version: String::new(),
+            nodes: vec![
+                make_node("a", "Foo", NodeKind::Struct, "Foo.swift"),
+                make_node("b", "Bar", NodeKind::Function, "Bar.swift"),
+            ],
+            edges: vec![],
+        };
+
+        let result = query_file_symbols(&graph, "Modules/Room/Sources/Room/View/Foo.swift");
+        assert_eq!(result.total, 1);
+        assert_eq!(result.symbols[0].symbol.name, "Foo");
     }
 
     #[test]

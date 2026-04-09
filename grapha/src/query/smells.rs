@@ -4,7 +4,9 @@ use serde::Serialize;
 
 use grapha_core::graph::{EdgeKind, Graph, Node, NodeKind};
 
-use super::{SymbolRef, is_swiftui_invalidation_source};
+use super::{
+    SymbolRef, file_matches_query_path, is_swiftui_invalidation_source, normalize_symbol_name,
+};
 
 #[derive(Debug, Serialize)]
 pub struct SmellsResult {
@@ -24,8 +26,7 @@ pub struct Smell {
 }
 
 fn file_matches_query(node: &Node, file_query: &str) -> bool {
-    let file_str = node.file.to_string_lossy();
-    file_str.ends_with(file_query) || file_str.contains(file_query)
+    file_matches_query_path(&node.file, file_query)
 }
 
 fn collect_contains_descendants(graph: &Graph, root_ids: &HashSet<String>) -> HashSet<String> {
@@ -97,6 +98,58 @@ fn detect_smells_for_root_ids(graph: &Graph, root_ids: HashSet<String>) -> Smell
         .retain(|smell| root_ids.contains(smell.symbol.id.as_str()));
     recompute_totals(&mut result);
     result
+}
+
+fn body_scope_expansion(graph: &Graph, symbol_id: &str) -> (HashSet<String>, Option<SymbolRef>) {
+    let node_index: HashMap<&str, &Node> = graph.nodes.iter().map(|n| (n.id.as_str(), n)).collect();
+    let Some(node) = node_index.get(symbol_id).copied() else {
+        return (HashSet::new(), None);
+    };
+
+    let mut root_ids = HashSet::from([symbol_id.to_string()]);
+    let mut lift_target = None;
+
+    if is_type_node(node.kind) {
+        let body_ids: Vec<&str> = graph
+            .edges
+            .iter()
+            .filter_map(|edge| match edge.kind {
+                EdgeKind::Implements if edge.target == symbol_id => {
+                    node_index.get(edge.source.as_str()).copied()
+                }
+                EdgeKind::TypeRef if edge.source == symbol_id => {
+                    node_index.get(edge.target.as_str()).copied()
+                }
+                _ => None,
+            })
+            .filter(|candidate| normalize_symbol_name(&candidate.name) == "body")
+            .map(|candidate| candidate.id.as_str())
+            .collect();
+
+        if !body_ids.is_empty() {
+            root_ids.extend(body_ids.into_iter().map(str::to_string));
+            lift_target = Some(to_symbol_ref(node));
+        }
+    }
+
+    (root_ids, lift_target)
+}
+
+fn lift_associated_smells(
+    result: &mut SmellsResult,
+    root_ids: &HashSet<String>,
+    lift_target: &SymbolRef,
+) {
+    for smell in &mut result.smells {
+        if root_ids.contains(smell.symbol.id.as_str()) && smell.symbol.id != lift_target.id {
+            smell.symbol = lift_target.clone();
+            if let Some(rest) = smell.message.strip_prefix("getter:body ") {
+                smell.message = format!("{} body {rest}", lift_target.name);
+            } else if let Some(rest) = smell.message.strip_prefix("body ") {
+                smell.message = format!("{} body {rest}", lift_target.name);
+            }
+        }
+    }
 }
 
 fn to_symbol_ref(node: &Node) -> SymbolRef {
@@ -455,8 +508,12 @@ pub fn detect_smells_for_file(graph: &Graph, file_query: &str) -> SmellsResult {
 }
 
 pub fn detect_smells_for_symbol(graph: &Graph, symbol_id: &str) -> SmellsResult {
-    let root_ids = HashSet::from([symbol_id.to_string()]);
-    detect_smells_for_root_ids(graph, root_ids)
+    let (root_ids, lift_target) = body_scope_expansion(graph, symbol_id);
+    let mut result = detect_smells_for_root_ids(graph, root_ids.clone());
+    if let Some(lift_target) = lift_target.as_ref() {
+        lift_associated_smells(&mut result, &root_ids, lift_target);
+    }
+    result
 }
 
 pub fn filter_smells_to_module(graph: &Graph, result: &mut SmellsResult, module_name: &str) {
@@ -559,5 +616,94 @@ mod tests {
 
         let result = detect_smells(&graph);
         assert_eq!(result.total, 0);
+    }
+
+    #[test]
+    fn file_scope_matches_repo_relative_query_when_graph_stores_basename() {
+        let mut nodes = vec![make_node(
+            "view",
+            "RoomPageCenterContentView",
+            NodeKind::Struct,
+            "RoomPage+Layout.swift",
+        )];
+        let mut edges = vec![make_edge("view::body", "view", EdgeKind::Implements)];
+        nodes.push(make_node(
+            "view::body",
+            "getter:body",
+            NodeKind::Function,
+            "RoomPage+Layout.swift",
+        ));
+        for i in 0..16 {
+            let id = format!("dep::{i}");
+            nodes.push(make_node(
+                &id,
+                &format!("dep{i}"),
+                NodeKind::Function,
+                "Deps.swift",
+            ));
+            edges.push(make_edge("view::body", &id, EdgeKind::Calls));
+        }
+
+        let graph = Graph {
+            version: String::new(),
+            nodes,
+            edges,
+        };
+
+        let result = detect_smells_for_file(
+            &graph,
+            "Modules/Room/Sources/Room/View/RoomPage+Layout.swift",
+        );
+        assert_eq!(result.total, 1);
+        assert_eq!(result.smells[0].kind, "high_fan_out");
+    }
+
+    #[test]
+    fn symbol_scope_on_view_type_includes_body_smell_and_lifts_it_to_type() {
+        let mut nodes = vec![make_node(
+            "view",
+            "RoomPageCenterContentView",
+            NodeKind::Struct,
+            "RoomPage+Layout.swift",
+        )];
+        let mut edges = vec![
+            make_edge("view::body", "view", EdgeKind::Implements),
+            make_edge("view", "view::getter:body", EdgeKind::TypeRef),
+        ];
+        nodes.push(make_node(
+            "view::body",
+            "body",
+            NodeKind::Property,
+            "RoomPage+Layout.swift",
+        ));
+        nodes.push(make_node(
+            "view::getter:body",
+            "getter:body",
+            NodeKind::Function,
+            "RoomPage+Layout.swift",
+        ));
+        for i in 0..16 {
+            let id = format!("dep::{i}");
+            nodes.push(make_node(
+                &id,
+                &format!("dep{i}"),
+                NodeKind::Function,
+                "Deps.swift",
+            ));
+            edges.push(make_edge("view::getter:body", &id, EdgeKind::Calls));
+        }
+
+        let graph = Graph {
+            version: String::new(),
+            nodes,
+            edges,
+        };
+
+        let result = detect_smells_for_symbol(&graph, "view");
+        assert_eq!(result.total, 1);
+        assert_eq!(result.smells[0].kind, "high_fan_out");
+        assert_eq!(result.smells[0].symbol.id, "view");
+        assert_eq!(result.smells[0].symbol.name, "RoomPageCenterContentView");
+        assert!(result.smells[0].message.contains("body"));
     }
 }

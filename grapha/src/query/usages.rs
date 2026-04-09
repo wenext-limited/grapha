@@ -123,7 +123,9 @@ fn owning_symbol<'a>(
     let mut current = Some(node_id);
     while let Some(id) = current {
         let node = node_index.get(id).copied()?;
-        if !matches!(node.kind, NodeKind::View | NodeKind::Branch) {
+        if !matches!(node.kind, NodeKind::View | NodeKind::Branch)
+            && !node.metadata.contains_key("l10n.ref_kind")
+        {
             return Some(node);
         }
         current = parents.get(id).copied();

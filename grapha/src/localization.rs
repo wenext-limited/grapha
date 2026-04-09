@@ -776,6 +776,7 @@ fn wrapper_node_matches_base(node: &Node, wrapper_base: Option<&str>) -> bool {
 
     node.id.contains(&format!("::{wrapper_base}::"))
         || node.id.contains(&format!("::ext_{wrapper_base}::"))
+        || node.id.contains(wrapper_base)
 }
 
 fn candidate_wrapper_nodes<'a>(
@@ -1383,6 +1384,118 @@ mod tests {
         assert_eq!(
             resolution.matches[0].reference.wrapper_symbol.as_deref(),
             Some(resource_wrapper.id.as_str())
+        );
+        assert_eq!(resolution.matches[0].match_kind, "wrapper_name");
+        assert!(resolution.unmatched.is_none());
+    }
+
+    #[test]
+    fn resolve_usage_falls_back_to_wrapper_name_for_usr_wrapper_ids() {
+        let mut usage = Node {
+            id: "Modules/Room/Sources/Room/View/RoomPage+Layout.swift::RoomPageHeaderView::onShare::l10n:shareText"
+                .to_string(),
+            kind: NodeKind::Property,
+            name: "shareText".to_string(),
+            file: PathBuf::from("RoomPage+Layout.swift"),
+            span: Span {
+                start: [265, 12],
+                end: [269, 13],
+            },
+            visibility: Visibility::Private,
+            metadata: HashMap::new(),
+            role: None,
+            signature: None,
+            doc_comment: None,
+            module: Some("Room".to_string()),
+            snippet: None,
+        };
+        usage
+            .metadata
+            .insert(META_REF_KIND.to_string(), "wrapper".to_string());
+        usage
+            .metadata
+            .insert(META_WRAPPER_NAME.to_string(), "roomShareDesc".to_string());
+        usage
+            .metadata
+            .insert(META_WRAPPER_BASE.to_string(), "L10n".to_string());
+
+        let mut l10n_wrapper = Node {
+            id: "s:11AppResource4L10nO13roomShareDescSSvpZ".to_string(),
+            kind: NodeKind::Property,
+            name: "roomShareDesc".to_string(),
+            file: PathBuf::from("Strings.generated.swift"),
+            span: Span {
+                start: [1, 1],
+                end: [1, 2],
+            },
+            visibility: Visibility::Public,
+            metadata: HashMap::new(),
+            role: None,
+            signature: None,
+            doc_comment: None,
+            module: Some("AppUI".to_string()),
+            snippet: None,
+        };
+        l10n_wrapper
+            .metadata
+            .insert(META_WRAPPER_TABLE.to_string(), "Localizable".to_string());
+        l10n_wrapper
+            .metadata
+            .insert(META_WRAPPER_KEY.to_string(), "room_share_desc".to_string());
+
+        let mut resource_wrapper = Node {
+            id: "s:14FrameResources12L10nResourceV03AppD0E13roomShareDescACvpZ".to_string(),
+            kind: NodeKind::Property,
+            name: "roomShareDesc".to_string(),
+            file: PathBuf::from("Strings.generated.swift"),
+            span: Span {
+                start: [2, 1],
+                end: [2, 2],
+            },
+            visibility: Visibility::Public,
+            metadata: HashMap::new(),
+            role: None,
+            signature: None,
+            doc_comment: None,
+            module: Some("AppUI".to_string()),
+            snippet: None,
+        };
+        resource_wrapper
+            .metadata
+            .insert(META_WRAPPER_TABLE.to_string(), "Localizable".to_string());
+        resource_wrapper.metadata.insert(
+            META_WRAPPER_KEY.to_string(),
+            "room_share_desc_resource".to_string(),
+        );
+
+        let graph = Graph {
+            version: "0.1.0".to_string(),
+            nodes: vec![usage.clone(), l10n_wrapper.clone(), resource_wrapper],
+            edges: Vec::new(),
+        };
+        let catalogs = LocalizationCatalogIndex::from_records(vec![LocalizationCatalogRecord {
+            table: "Localizable".to_string(),
+            key: "room_share_desc".to_string(),
+            catalog_file: "Modules/Room/Resources/Localizable.xcstrings".to_string(),
+            catalog_dir: "Modules/Room/Resources".to_string(),
+            source_language: "en".to_string(),
+            source_value: "Share room".to_string(),
+            status: "translated".to_string(),
+            comment: None,
+        }]);
+
+        let resolution = resolve_usage(
+            &usage,
+            &edges_by_source(&graph),
+            &node_index(&graph),
+            &catalogs,
+        )
+        .expect("usage should resolve");
+
+        assert_eq!(resolution.matches.len(), 1);
+        assert_eq!(
+            resolution.matches[0].reference.wrapper_symbol.as_deref(),
+            Some(l10n_wrapper.id.as_str())
         );
         assert_eq!(resolution.matches[0].match_kind, "wrapper_name");
         assert!(resolution.unmatched.is_none());
