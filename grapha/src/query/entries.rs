@@ -133,9 +133,25 @@ mod tests {
         };
 
         let result = query_entries(&graph);
+        let actual: Vec<(&str, &str, &str, Option<&str>)> = result
+            .entries
+            .iter()
+            .map(|entry| {
+                (
+                    entry.id.as_str(),
+                    entry.name.as_str(),
+                    entry
+                        .file
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or(entry.file.as_str()),
+                    entry.module.as_deref(),
+                )
+            })
+            .collect();
+        let expected = vec![("room_body", "body", "RoomPage.swift", Some("Room"))];
 
+        assert_eq!(actual, expected);
         assert_eq!(result.total, 2);
-        assert_eq!(result.entries.len(), 1);
-        assert_eq!(result.entries[0].file, "RoomPage.swift");
     }
 }
