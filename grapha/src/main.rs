@@ -25,7 +25,7 @@ mod watch;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use anyhow::{Context, anyhow};
+use anyhow::{Context, anyhow, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use serde::Serialize;
 
@@ -406,6 +406,12 @@ enum RepoCommands {
         /// Filter to a specific module
         #[arg(long)]
         module: Option<String>,
+        /// Limit smell analysis to symbols declared in a matching file
+        #[arg(long)]
+        file: Option<String>,
+        /// Limit smell analysis to a specific symbol and its local neighborhood
+        #[arg(long)]
+        symbol: Option<String>,
         /// Project directory
         #[arg(short, long, default_value = ".")]
         path: PathBuf,
@@ -425,12 +431,40 @@ fn builtin_registry() -> anyhow::Result<grapha_core::LanguageRegistry> {
     Ok(registry)
 }
 
+struct PipelineOutput {
+    graph: grapha_core::graph::Graph,
+    extraction_cache_entries: std::collections::HashMap<String, cache::ExtractionCacheEntry>,
+}
+
+fn extraction_cache_key(path: &Path) -> String {
+    path.to_string_lossy().to_string()
+}
+
+fn make_extraction_cache_entry(
+    file: &Path,
+    file_context: &grapha_core::FileContext,
+    result: &grapha_core::ExtractionResult,
+) -> Option<(String, cache::ExtractionCacheEntry)> {
+    let stamp = cache::FileStamp::from_path(file)?;
+    Some((
+        extraction_cache_key(&file_context.relative_path),
+        cache::ExtractionCacheEntry {
+            stamp,
+            module_name: file_context.module_name.clone(),
+            result: result.clone(),
+        },
+    ))
+}
+
 /// Run the extraction pipeline on a path, returning a merged graph.
 fn run_pipeline(
     path: &Path,
     verbose: bool,
     timing: bool,
-) -> anyhow::Result<grapha_core::graph::Graph> {
+    existing_extraction_cache: Option<
+        &std::collections::HashMap<String, cache::ExtractionCacheEntry>,
+    >,
+) -> anyhow::Result<PipelineOutput> {
     let t = Instant::now();
     let registry = builtin_registry()?;
     let project_context = grapha_core::project_context(path);
@@ -526,18 +560,40 @@ fn run_pipeline(
     };
 
     use rayon::prelude::*;
+    use std::sync::Mutex;
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
     let skipped = AtomicUsize::new(0);
+    let extracted = AtomicUsize::new(0);
+    let reused_cached = AtomicUsize::new(0);
 
     // Per-phase timing accumulators (nanoseconds, summed across all threads)
     let t_read_ns = AtomicU64::new(0);
     let t_extract_ns = AtomicU64::new(0);
     let t_snippet_ns = AtomicU64::new(0);
+    let extraction_cache_entries = Mutex::new(std::collections::HashMap::new());
 
     let results: Vec<_> = all_files
         .par_iter()
         .filter_map(|file| {
+            let file_context = grapha_core::file_context(&project_context, &module_map, file);
+            let cache_key = extraction_cache_key(&file_context.relative_path);
+            if let Some(existing_cache) = existing_extraction_cache
+                && let Some(entry) = existing_cache.get(&cache_key)
+                && entry.module_name.as_deref() == file_context.module_name.as_deref()
+                && cache::FileStamp::from_path(file).is_some_and(|stamp| stamp == entry.stamp)
+            {
+                reused_cached.fetch_add(1, Ordering::Relaxed);
+                if let Some(ref pb) = pb {
+                    pb.inc(1);
+                }
+                extraction_cache_entries
+                    .lock()
+                    .expect("extraction cache mutex poisoned")
+                    .insert(cache_key, entry.clone());
+                return Some(entry.result.clone());
+            }
+
             let t0 = Instant::now();
             let source = match std::fs::read(file) {
                 Ok(s) => s,
@@ -552,7 +608,6 @@ fn run_pipeline(
             t_read_ns.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
 
             let t1 = Instant::now();
-            let file_context = grapha_core::file_context(&project_context, &module_map, file);
             let extraction_result =
                 grapha_core::extract_with_registry(&registry, &source, &file_context);
             t_extract_ns.fetch_add(t1.elapsed().as_nanos() as u64, Ordering::Relaxed);
@@ -563,6 +618,7 @@ fn run_pipeline(
 
             match extraction_result {
                 Ok(mut result) => {
+                    extracted.fetch_add(1, Ordering::Relaxed);
                     let t2 = Instant::now();
                     if result
                         .nodes
@@ -584,6 +640,14 @@ fn run_pipeline(
                         }
                     }
                     t_snippet_ns.fetch_add(t2.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                    if let Some((key, entry)) =
+                        make_extraction_cache_entry(file, &file_context, &result)
+                    {
+                        extraction_cache_entries
+                            .lock()
+                            .expect("extraction cache mutex poisoned")
+                            .insert(key, entry);
+                    }
                     Some(result)
                 }
                 Err(e) => {
@@ -600,6 +664,11 @@ fn run_pipeline(
         .collect();
 
     let skipped = skipped.load(Ordering::Relaxed);
+    let extracted = extracted.load(Ordering::Relaxed);
+    let reused_cached = reused_cached.load(Ordering::Relaxed);
+    let extraction_cache_entries = extraction_cache_entries
+        .into_inner()
+        .expect("extraction cache mutex poisoned");
 
     if let Some(pb) = pb {
         pb.finish_and_clear();
@@ -643,10 +712,20 @@ fn run_pipeline(
         );
     }
     if verbose {
-        let msg = if skipped > 0 {
-            format!("extracted {} files ({} skipped)", results.len(), skipped)
+        let msg = if skipped > 0 && reused_cached > 0 {
+            format!(
+                "extracted {} files, reused {} cached extraction results ({} skipped)",
+                extracted, reused_cached, skipped
+            )
+        } else if skipped > 0 {
+            format!("extracted {} files ({} skipped)", extracted, skipped)
+        } else if reused_cached > 0 {
+            format!(
+                "extracted {} files, reused {} cached extraction results",
+                extracted, reused_cached
+            )
         } else {
-            format!("extracted {} files", results.len())
+            format!("extracted {} files", extracted)
         };
         progress::done(&msg, t);
     }
@@ -703,7 +782,10 @@ fn run_pipeline(
         );
     }
 
-    Ok(graph)
+    Ok(PipelineOutput {
+        graph,
+        extraction_cache_entries,
+    })
 }
 
 fn load_graph(path: &Path) -> anyhow::Result<grapha_core::graph::Graph> {
@@ -938,7 +1020,7 @@ fn handle_analyze(
     compact: bool,
 ) -> anyhow::Result<()> {
     let verbose = output.is_some();
-    let mut graph = run_pipeline(&path, verbose, false)?;
+    let mut graph = run_pipeline(&path, verbose, false, None)?.graph;
 
     if let Some(ref filter_str) = filter {
         let kinds = filter::parse_filter(filter_str)?;
@@ -980,7 +1062,22 @@ fn handle_index(
 ) -> anyhow::Result<()> {
     let total_start = Instant::now();
     let store_path = store_dir.unwrap_or_else(|| path.join(".grapha"));
-    let graph = run_pipeline(&path, true, timing)?;
+    let extraction_cache = cache::ExtractionCache::new(&store_path);
+    let previous_extraction_cache = if full_rebuild {
+        None
+    } else {
+        match extraction_cache.load_entries() {
+            Ok(entries) => Some(entries),
+            Err(error) => {
+                eprintln!(
+                    "  \x1b[33m!\x1b[0m failed to load extraction cache, falling back to fresh extraction: {error}"
+                );
+                None
+            }
+        }
+    };
+    let pipeline = run_pipeline(&path, true, timing, previous_extraction_cache.as_ref())?;
+    let graph = pipeline.graph;
 
     std::fs::create_dir_all(&store_path)
         .with_context(|| format!("failed to create store dir {}", store_path.display()))?;
@@ -1061,6 +1158,9 @@ fn handle_index(
     // Invalidate stale binary caches now that the SQLite DB has been updated.
     cache::GraphCache::new(&store_path).invalidate();
     cache::QueryCache::new(&store_path).invalidate();
+    extraction_cache
+        .save_entries(&pipeline.extraction_cache_entries)
+        .with_context(|| "failed to save extraction cache".to_string())?;
 
     progress::done_elapsed(
         &format!(
@@ -1455,28 +1555,32 @@ fn handle_repo_command(command: RepoCommands) -> anyhow::Result<()> {
             let map = query::map::file_map(&graph, module.as_deref());
             print_json(&map)
         }
-        RepoCommands::Smells { module, path } => {
+        RepoCommands::Smells {
+            module,
+            file,
+            symbol,
+            path,
+        } => {
             let graph = load_graph(&path)?;
-            let mut result = query::smells::detect_smells(&graph);
+            let selected_scope_count = usize::from(module.is_some())
+                + usize::from(file.is_some())
+                + usize::from(symbol.is_some());
+            if selected_scope_count > 1 {
+                bail!("choose only one of --module, --file, or --symbol");
+            }
+
+            let mut result = if let Some(ref file_query) = file {
+                query::smells::detect_smells_for_file(&graph, file_query)
+            } else if let Some(ref symbol_query) = symbol {
+                let node =
+                    resolve_query_result(query::resolve_node(&graph, symbol_query), "symbol")?;
+                query::smells::detect_smells_for_symbol(&graph, &node.id)
+            } else {
+                query::smells::detect_smells(&graph)
+            };
 
             if let Some(ref module_name) = module {
-                let module_lower = module_name.to_lowercase();
-                result.smells.retain(|smell| {
-                    graph.nodes.iter().any(|n| {
-                        n.id == smell.symbol.id
-                            && n.module
-                                .as_ref()
-                                .is_some_and(|m| m.to_lowercase() == module_lower)
-                    })
-                });
-                result.total = result.smells.len();
-                result.by_severity.clear();
-                for smell in &result.smells {
-                    *result
-                        .by_severity
-                        .entry(smell.severity.clone())
-                        .or_default() += 1;
-                }
+                query::smells::filter_smells_to_module(&graph, &mut result, module_name);
             }
 
             print_json(&result)
@@ -1521,8 +1625,9 @@ fn handle_serve(path: PathBuf, port: u16, mcp_mode: bool, watch_mode: bool) -> a
                             watch::WatchEvent::FilesChanged(files) => {
                                 eprintln!("watch: {} file(s) changed, re-indexing...", files.len());
                                 // Run full pipeline and persist
-                                match run_pipeline(&project_path, false, false) {
-                                    Ok(graph) => {
+                                match run_pipeline(&project_path, false, false, None) {
+                                    Ok(output) => {
+                                        let graph = output.graph;
                                         // Persist to SQLite
                                         let store_file = store_path.join("grapha.db");
                                         let store = store::sqlite::SqliteStore::new(store_file);

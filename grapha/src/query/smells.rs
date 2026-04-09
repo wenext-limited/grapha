@@ -23,6 +23,82 @@ pub struct Smell {
     pub threshold: usize,
 }
 
+fn file_matches_query(node: &Node, file_query: &str) -> bool {
+    let file_str = node.file.to_string_lossy();
+    file_str.ends_with(file_query) || file_str.contains(file_query)
+}
+
+fn collect_contains_descendants(graph: &Graph, root_ids: &HashSet<String>) -> HashSet<String> {
+    let contains_adj: HashMap<&str, Vec<&str>> = graph
+        .edges
+        .iter()
+        .filter(|edge| edge.kind == EdgeKind::Contains)
+        .fold(HashMap::new(), |mut acc, edge| {
+            acc.entry(edge.source.as_str())
+                .or_default()
+                .push(edge.target.as_str());
+            acc
+        });
+
+    let mut scoped_ids = root_ids.clone();
+    let mut stack: Vec<String> = root_ids.iter().cloned().collect();
+    while let Some(node_id) = stack.pop() {
+        if let Some(children) = contains_adj.get(node_id.as_str()) {
+            for child in children {
+                if scoped_ids.insert((*child).to_string()) {
+                    stack.push((*child).to_string());
+                }
+            }
+        }
+    }
+    scoped_ids
+}
+
+fn build_scoped_graph(graph: &Graph, scoped_node_ids: &HashSet<String>) -> Graph {
+    let nodes = graph
+        .nodes
+        .iter()
+        .filter(|node| scoped_node_ids.contains(&node.id))
+        .cloned()
+        .collect();
+    let edges = graph
+        .edges
+        .iter()
+        .filter(|edge| {
+            scoped_node_ids.contains(&edge.source) || scoped_node_ids.contains(&edge.target)
+        })
+        .cloned()
+        .collect();
+
+    Graph {
+        version: graph.version.clone(),
+        nodes,
+        edges,
+    }
+}
+
+fn recompute_totals(result: &mut SmellsResult) {
+    result.total = result.smells.len();
+    result.by_severity.clear();
+    for smell in &result.smells {
+        *result
+            .by_severity
+            .entry(smell.severity.clone())
+            .or_default() += 1;
+    }
+}
+
+fn detect_smells_for_root_ids(graph: &Graph, root_ids: HashSet<String>) -> SmellsResult {
+    let scoped_node_ids = collect_contains_descendants(graph, &root_ids);
+    let scoped_graph = build_scoped_graph(graph, &scoped_node_ids);
+    let mut result = detect_smells(&scoped_graph);
+    result
+        .smells
+        .retain(|smell| root_ids.contains(smell.symbol.id.as_str()));
+    recompute_totals(&mut result);
+    result
+}
+
 fn to_symbol_ref(node: &Node) -> SymbolRef {
     SymbolRef::from_node(node)
 }
@@ -366,6 +442,34 @@ pub fn detect_smells(graph: &Graph) -> SmellsResult {
         total,
         by_severity,
     }
+}
+
+pub fn detect_smells_for_file(graph: &Graph, file_query: &str) -> SmellsResult {
+    let root_ids: HashSet<String> = graph
+        .nodes
+        .iter()
+        .filter(|node| file_matches_query(node, file_query))
+        .map(|node| node.id.clone())
+        .collect();
+    detect_smells_for_root_ids(graph, root_ids)
+}
+
+pub fn detect_smells_for_symbol(graph: &Graph, symbol_id: &str) -> SmellsResult {
+    let root_ids = HashSet::from([symbol_id.to_string()]);
+    detect_smells_for_root_ids(graph, root_ids)
+}
+
+pub fn filter_smells_to_module(graph: &Graph, result: &mut SmellsResult, module_name: &str) {
+    let module_lower = module_name.to_lowercase();
+    result.smells.retain(|smell| {
+        graph.nodes.iter().any(|n| {
+            n.id == smell.symbol.id
+                && n.module
+                    .as_ref()
+                    .is_some_and(|m| m.to_lowercase() == module_lower)
+        })
+    });
+    recompute_totals(result);
 }
 
 fn severity_rank(severity: &str) -> usize {

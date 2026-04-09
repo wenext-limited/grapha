@@ -1,5 +1,13 @@
 use grapha_core::graph::{NodeKind, Span};
 
+#[cfg(test)]
+use std::cell::Cell;
+
+#[cfg(test)]
+thread_local! {
+    static DECLARATION_BLOCK_SCAN_COUNT: Cell<usize> = const { Cell::new(0) };
+}
+
 pub fn should_extract_snippet(kind: NodeKind) -> bool {
     !matches!(
         kind,
@@ -132,6 +140,9 @@ impl<'a> LineIndex<'a> {
         kind: NodeKind,
         preferred_line: usize,
     ) -> Option<SnippetCandidate> {
+        #[cfg(test)]
+        DECLARATION_BLOCK_SCAN_COUNT.with(|count| count.set(count.get() + 1));
+
         if kind != NodeKind::Function {
             return None;
         }
@@ -299,27 +310,27 @@ impl<'a> LineIndex<'a> {
                     snippet,
                     anchor_line: span.start[0].saturating_sub(1),
                 }),
-            self.declaration_block_for_symbol(symbol, kind, preferred_line),
         ]
         .into_iter()
         .flatten()
         {
-            if !candidate.snippet.trim().is_empty()
-                && !candidates
-                    .iter()
-                    .any(|existing: &SnippetCandidate| existing.snippet == candidate.snippet)
-            {
-                candidates.push(candidate);
+            push_unique_candidate(&mut candidates, candidate);
+        }
+
+        if let Some(best) = best_snippet_candidate(&candidates, symbol, kind, preferred_line) {
+            let best_score = Self::score_candidate(&best, symbol, kind, preferred_line);
+            if is_sufficient_snippet_match(&best_score, kind) {
+                return Some(trim_snippet_indentation(&best.snippet));
             }
         }
 
-        if let Some(best) = candidates
-            .into_iter()
-            .max_by_key(|candidate| Self::score_candidate(candidate, symbol, kind, preferred_line))
-        {
-            let best_score = Self::score_candidate(&best, symbol, kind, preferred_line);
-            if best_score.0 > 0 || best_score.1 > 0 {
-                return Some(trim_snippet_indentation(&best.snippet));
+        if let Some(candidate) = self.declaration_block_for_symbol(symbol, kind, preferred_line) {
+            push_unique_candidate(&mut candidates, candidate);
+            if let Some(best) = best_snippet_candidate(&candidates, symbol, kind, preferred_line) {
+                let best_score = Self::score_candidate(&best, symbol, kind, preferred_line);
+                if is_sufficient_snippet_match(&best_score, kind) {
+                    return Some(trim_snippet_indentation(&best.snippet));
+                }
             }
         }
 
@@ -345,6 +356,51 @@ impl<'a> LineIndex<'a> {
             Some(pos) if pos > 0 => Some(truncated[..pos].to_string()),
             _ => Some(truncated.to_string()),
         }
+    }
+
+    #[cfg(test)]
+    fn reset_declaration_block_scan_count() {
+        DECLARATION_BLOCK_SCAN_COUNT.with(|count| count.set(0));
+    }
+
+    #[cfg(test)]
+    fn declaration_block_scan_count() -> usize {
+        DECLARATION_BLOCK_SCAN_COUNT.with(Cell::get)
+    }
+}
+
+fn push_unique_candidate(candidates: &mut Vec<SnippetCandidate>, candidate: SnippetCandidate) {
+    if !candidate.snippet.trim().is_empty()
+        && !candidates
+            .iter()
+            .any(|existing: &SnippetCandidate| existing.snippet == candidate.snippet)
+    {
+        candidates.push(candidate);
+    }
+}
+
+fn best_snippet_candidate(
+    candidates: &[SnippetCandidate],
+    symbol: &str,
+    kind: NodeKind,
+    preferred_line: usize,
+) -> Option<SnippetCandidate> {
+    candidates
+        .iter()
+        .max_by_key(|candidate| LineIndex::score_candidate(candidate, symbol, kind, preferred_line))
+        .map(|candidate| SnippetCandidate {
+            snippet: candidate.snippet.clone(),
+            anchor_line: candidate.anchor_line,
+        })
+}
+
+fn is_sufficient_snippet_match(
+    best_score: &(usize, usize, usize, usize, usize),
+    kind: NodeKind,
+) -> bool {
+    match kind {
+        NodeKind::Function => best_score.3 > 0 && (best_score.0 > 0 || best_score.1 > 0),
+        _ => best_score.0 > 0 || best_score.1 > 0,
     }
 }
 
@@ -494,6 +550,45 @@ mod tests {
             index.extract_symbol_snippet(&span, "load()", NodeKind::Function),
             Some("func load() {\n    second()\n}".to_string())
         );
+    }
+
+    #[test]
+    fn extract_symbol_snippet_skips_declaration_scan_when_exact_function_block_already_matches() {
+        let source = "struct Worker {\n    func load() {\n        second()\n    }\n}\n";
+        let index = LineIndex::new(source);
+        let span = Span {
+            start: [1, 4],
+            end: [3, 5],
+        };
+
+        LineIndex::reset_declaration_block_scan_count();
+
+        assert_eq!(
+            index.extract_symbol_snippet(&span, "load()", NodeKind::Function),
+            Some("func load() {\n    second()\n}".to_string())
+        );
+        assert_eq!(LineIndex::declaration_block_scan_count(), 0);
+    }
+
+    #[test]
+    fn extract_symbol_snippet_uses_declaration_scan_when_span_only_covers_signature() {
+        let source = "    @inline(__always) private func requestGetUser(\n        _ data: SingleUserRequest\n    ) async throws(RequestError) -> UserInfo {\n        try await request(\n            \"user/getUserInfoByUid/\\\\(data.id)\",\n            data: [\"attrs\": data.attrs.map(\\\\.rawValue).sorted()]\n        )\n    }\n";
+        let index = LineIndex::new(source);
+        let span = Span {
+            start: [0, 4],
+            end: [0, 39],
+        };
+
+        LineIndex::reset_declaration_block_scan_count();
+
+        assert_eq!(
+            index.extract_symbol_snippet(&span, "requestGetUser(_:)", NodeKind::Function),
+            Some(
+                "@inline(__always) private func requestGetUser(\n    _ data: SingleUserRequest\n) async throws(RequestError) -> UserInfo {\n    try await request(\n        \"user/getUserInfoByUid/\\\\(data.id)\",\n        data: [\"attrs\": data.attrs.map(\\\\.rawValue).sorted()]\n    )\n}"
+                    .to_string()
+            )
+        );
+        assert_eq!(LineIndex::declaration_block_scan_count(), 1);
     }
 
     #[test]

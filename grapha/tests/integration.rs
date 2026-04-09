@@ -195,6 +195,94 @@ fn write_strings_fixture(path: &std::path::Path, key: &str, value: &str) {
     std::fs::write(path, format!(r#""{key}" = "{value}";"#)).unwrap();
 }
 
+fn write_repo_smells_scope_fixture(dir: &std::path::Path) {
+    std::fs::write(
+        dir.join("main.rs"),
+        r#"
+        mod other;
+
+        fn hot() {
+            helper01();
+            helper02();
+            helper03();
+            helper04();
+            helper05();
+            helper06();
+            helper07();
+            helper08();
+            helper09();
+            helper10();
+            helper11();
+            helper12();
+            helper13();
+            helper14();
+            helper15();
+            helper16();
+        }
+
+        fn helper01() {}
+        fn helper02() {}
+        fn helper03() {}
+        fn helper04() {}
+        fn helper05() {}
+        fn helper06() {}
+        fn helper07() {}
+        fn helper08() {}
+        fn helper09() {}
+        fn helper10() {}
+        fn helper11() {}
+        fn helper12() {}
+        fn helper13() {}
+        fn helper14() {}
+        fn helper15() {}
+        fn helper16() {}
+        "#,
+    )
+    .unwrap();
+
+    std::fs::write(
+        dir.join("other.rs"),
+        r#"
+        pub fn noisy() {
+            other01();
+            other02();
+            other03();
+            other04();
+            other05();
+            other06();
+            other07();
+            other08();
+            other09();
+            other10();
+            other11();
+            other12();
+            other13();
+            other14();
+            other15();
+            other16();
+        }
+
+        fn other01() {}
+        fn other02() {}
+        fn other03() {}
+        fn other04() {}
+        fn other05() {}
+        fn other06() {}
+        fn other07() {}
+        fn other08() {}
+        fn other09() {}
+        fn other10() {}
+        fn other11() {}
+        fn other12() {}
+        fn other13() {}
+        fn other14() {}
+        fn other15() {}
+        fn other16() {}
+        "#,
+    )
+    .unwrap();
+}
+
 #[test]
 fn index_creates_sqlite_db() {
     let dir = tempfile::tempdir().unwrap();
@@ -234,6 +322,104 @@ fn index_json_format() {
 
     assert!(store_dir.join("graph.json").exists());
     assert!(store_dir.join("localization.json").exists());
+}
+
+#[test]
+fn index_reuses_cached_extractions_when_sources_are_unchanged() {
+    let dir = tempfile::tempdir().unwrap();
+    let store_dir = dir.path().join(".grapha");
+    std::fs::write(
+        dir.path().join("main.rs"),
+        "mod helper;\nfn main() { helper::run(); }\n",
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("helper.rs"), "pub fn run() {}\n").unwrap();
+
+    grapha()
+        .args([
+            "index",
+            dir.path().to_str().unwrap(),
+            "--store-dir",
+            store_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    grapha()
+        .args([
+            "index",
+            dir.path().to_str().unwrap(),
+            "--store-dir",
+            store_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains(
+            "reused 2 cached extraction results",
+        ))
+        .stderr(predicate::str::contains("extracted 0 files"));
+}
+
+#[test]
+fn repo_smells_file_scope_limits_results_to_matching_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let store_dir = dir.path().join(".grapha");
+    write_repo_smells_scope_fixture(dir.path());
+
+    grapha()
+        .args([
+            "index",
+            dir.path().to_str().unwrap(),
+            "--store-dir",
+            store_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    grapha()
+        .args([
+            "repo",
+            "smells",
+            "--file",
+            "main.rs",
+            "-p",
+            dir.path().to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"name\": \"hot\""))
+        .stdout(predicate::str::contains("\"name\": \"noisy\"").not());
+}
+
+#[test]
+fn repo_smells_symbol_scope_limits_results_to_symbol_neighborhood() {
+    let dir = tempfile::tempdir().unwrap();
+    let store_dir = dir.path().join(".grapha");
+    write_repo_smells_scope_fixture(dir.path());
+
+    grapha()
+        .args([
+            "index",
+            dir.path().to_str().unwrap(),
+            "--store-dir",
+            store_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    grapha()
+        .args([
+            "repo",
+            "smells",
+            "--symbol",
+            "main.rs::hot",
+            "-p",
+            dir.path().to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"name\": \"hot\""))
+        .stdout(predicate::str::contains("\"name\": \"noisy\"").not());
 }
 
 #[test]

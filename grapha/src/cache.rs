@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Context;
+use grapha_core::extract::ExtractionResult;
 use grapha_core::graph::Graph;
 use serde::{Deserialize, Serialize};
 
@@ -61,6 +62,7 @@ impl GraphCache {
 
 const QUERY_CACHE_FILENAME: &str = "query_cache.bin";
 const MAX_QUERY_CACHE_ENTRIES: usize = 64;
+const EXTRACTION_CACHE_FILENAME: &str = "extraction_cache.bin";
 
 #[derive(Serialize, Deserialize)]
 struct QueryCacheEntry {
@@ -68,10 +70,75 @@ struct QueryCacheEntry {
     output: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileStamp {
+    pub len: u64,
+    pub modified_secs: u64,
+    pub modified_nanos: u32,
+}
+
+impl FileStamp {
+    pub fn from_path(path: &Path) -> Option<Self> {
+        let metadata = fs::metadata(path).ok()?;
+        let modified = metadata.modified().ok()?.duration_since(UNIX_EPOCH).ok()?;
+        Some(Self {
+            len: metadata.len(),
+            modified_secs: modified.as_secs(),
+            modified_nanos: modified.subsec_nanos(),
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExtractionCacheEntry {
+    pub stamp: FileStamp,
+    pub module_name: Option<String>,
+    pub result: ExtractionResult,
+}
+
+pub struct ExtractionCache {
+    cache_path: PathBuf,
+}
+
 /// Cache for serialized query output, keyed by a string and invalidated when
 /// the SQLite database changes.
 pub struct QueryCache {
     cache_path: PathBuf,
+}
+
+impl ExtractionCache {
+    pub fn new(store_dir: &Path) -> Self {
+        Self {
+            cache_path: store_dir.join(EXTRACTION_CACHE_FILENAME),
+        }
+    }
+
+    pub fn load_entries(&self) -> anyhow::Result<HashMap<String, ExtractionCacheEntry>> {
+        let Ok(contents) = fs::read_to_string(&self.cache_path) else {
+            return Ok(HashMap::new());
+        };
+        serde_json::from_str(&contents).with_context(|| {
+            format!(
+                "deserialising extraction cache {}",
+                self.cache_path.display()
+            )
+        })
+    }
+
+    pub fn save_entries(
+        &self,
+        entries: &HashMap<String, ExtractionCacheEntry>,
+    ) -> anyhow::Result<()> {
+        if let Some(parent) = self.cache_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let contents = serde_json::to_string(entries).with_context(|| {
+            format!("serialising extraction cache {}", self.cache_path.display())
+        })?;
+        fs::write(&self.cache_path, contents)
+            .with_context(|| format!("writing extraction cache {}", self.cache_path.display()))?;
+        Ok(())
+    }
 }
 
 fn mtime_secs(path: &Path) -> Option<u64> {
@@ -159,10 +226,36 @@ impl GraphCache {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+    use std::path::PathBuf;
     use std::thread;
     use std::time::Duration;
 
+    use grapha_core::graph::{Node, NodeKind, Span, Visibility};
+
     use super::*;
+
+    fn sample_extraction_result(file: &str) -> ExtractionResult {
+        let mut result = ExtractionResult::new();
+        result.nodes.push(Node {
+            id: format!("{file}::main"),
+            kind: NodeKind::Function,
+            name: "main".to_string(),
+            file: PathBuf::from(file),
+            span: Span {
+                start: [0, 0],
+                end: [1, 0],
+            },
+            visibility: Visibility::Private,
+            metadata: HashMap::new(),
+            role: None,
+            signature: None,
+            doc_comment: None,
+            module: Some("sample".to_string()),
+            snippet: Some("fn main() {}".to_string()),
+        });
+        result
+    }
 
     // ── cache_is_fresh ────────────────────────────────────────────────────────
 
@@ -282,5 +375,45 @@ mod tests {
 
         assert_eq!(qc.get("key_a", &db_path).as_deref(), Some("output_a"));
         assert_eq!(qc.get("key_b", &db_path).as_deref(), Some("output_b"));
+    }
+
+    #[test]
+    fn file_stamp_changes_when_file_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("main.rs");
+        fs::write(&file, "fn main() {}\n").unwrap();
+        let first = FileStamp::from_path(&file).unwrap();
+
+        thread::sleep(Duration::from_millis(10));
+        fs::write(&file, "fn main() { println!(\"hi\"); }\n").unwrap();
+        let second = FileStamp::from_path(&file).unwrap();
+
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn extraction_cache_round_trips_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = ExtractionCache::new(dir.path());
+        let file = dir.path().join("main.rs");
+        fs::write(&file, "fn main() {}\n").unwrap();
+
+        let mut entries = HashMap::new();
+        entries.insert(
+            "main.rs".to_string(),
+            ExtractionCacheEntry {
+                stamp: FileStamp::from_path(&file).unwrap(),
+                module_name: Some("sample".to_string()),
+                result: sample_extraction_result("main.rs"),
+            },
+        );
+
+        cache.save_entries(&entries).unwrap();
+        let loaded = cache.load_entries().unwrap();
+
+        assert_eq!(loaded.len(), 1);
+        let entry = loaded.get("main.rs").unwrap();
+        assert_eq!(entry.module_name.as_deref(), Some("sample"));
+        assert_eq!(entry.result.nodes[0].name, "main");
     }
 }

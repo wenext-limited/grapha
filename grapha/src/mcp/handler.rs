@@ -175,13 +175,21 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "detect_smells".to_string(),
-            description: "Scan the entire graph for code smells: god types (>15 properties), excessive dependencies (>10), wide invalidation surfaces (>5 sources), massive inits (>8 params), deep nesting (>5 levels), high fan-out/fan-in (>15 calls), and many extensions (>5). Returns smells sorted by severity.".to_string(),
+            description: "Scan for code smells across the repo or within a specific module, file, or symbol scope: god types (>15 properties), excessive dependencies (>10), wide invalidation surfaces (>5 sources), massive inits (>8 params), deep nesting (>5 levels), high fan-out/fan-in (>15 calls), and many extensions (>5). Returns smells sorted by severity.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "module": {
                         "type": "string",
-                        "description": "Filter smells to a specific module (optional, scans all if omitted)"
+                        "description": "Limit smell analysis to a specific module"
+                    },
+                    "file": {
+                        "type": "string",
+                        "description": "Limit smell analysis to symbols declared in a matching file"
+                    },
+                    "symbol": {
+                        "type": "string",
+                        "description": "Limit smell analysis to a specific symbol and its local neighborhood"
                     }
                 }
             }),
@@ -469,30 +477,31 @@ fn handle_analyze_complexity(state: &mut McpState, arguments: &Value) -> Value {
 
 fn handle_detect_smells(state: &McpState, arguments: &Value) -> Value {
     let module_filter = arguments.get("module").and_then(|v| v.as_str());
+    let file_filter = arguments.get("file").and_then(|v| v.as_str());
+    let symbol_filter = arguments.get("symbol").and_then(|v| v.as_str());
 
-    let mut result = query::smells::detect_smells(&state.graph);
+    let scope_count = [module_filter, file_filter, symbol_filter]
+        .into_iter()
+        .flatten()
+        .count();
+    if scope_count > 1 {
+        return tool_error("choose only one of module, file, or symbol".to_string());
+    }
 
-    // Filter by module if specified
+    let mut result = if let Some(file) = file_filter {
+        query::smells::detect_smells_for_file(&state.graph, file)
+    } else if let Some(symbol_query) = symbol_filter {
+        let node = match query::resolve_node(&state.graph, symbol_query) {
+            Ok(node) => node,
+            Err(e) => return tool_error(format_query_error(&e)),
+        };
+        query::smells::detect_smells_for_symbol(&state.graph, &node.id)
+    } else {
+        query::smells::detect_smells(&state.graph)
+    };
+
     if let Some(module) = module_filter {
-        let module_lower = module.to_lowercase();
-        result.smells.retain(|smell| {
-            // Check if the symbol's file or the smell's symbol belongs to the module
-            // by looking up the node's module in the graph
-            state.graph.nodes.iter().any(|n| {
-                n.id == smell.symbol.id
-                    && n.module
-                        .as_ref()
-                        .is_some_and(|m| m.to_lowercase() == module_lower)
-            })
-        });
-        result.total = result.smells.len();
-        result.by_severity.clear();
-        for smell in &result.smells {
-            *result
-                .by_severity
-                .entry(smell.severity.clone())
-                .or_default() += 1;
-        }
+        query::smells::filter_smells_to_module(&state.graph, &mut result, module);
     }
 
     serialize_result(&result)
@@ -546,6 +555,8 @@ fn handle_reload(state: &mut McpState) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use grapha_core::graph::{Edge, EdgeKind, Node, NodeKind, Span, Visibility};
+    use std::collections::HashMap;
 
     #[test]
     fn tool_definitions_count() {
@@ -627,6 +638,39 @@ mod tests {
     }
 
     #[test]
+    fn detect_smells_rejects_multiple_scopes() {
+        let mut state = make_test_state();
+        let result = handle_tool_call(
+            &mut state,
+            "detect_smells",
+            &json!({"module": "Room", "file": "RoomPage.swift"}),
+        );
+        assert!(
+            result
+                .get("isError")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+        );
+    }
+
+    #[test]
+    fn detect_smells_symbol_scope_limits_results() {
+        let mut state = make_test_state_with_smells();
+        let result = handle_tool_call(&mut state, "detect_smells", &json!({"symbol": "MainView"}));
+        assert!(
+            !result
+                .get("isError")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+        );
+
+        let text = result["content"][0]["text"].as_str().unwrap();
+        let parsed: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(parsed["total"], 1);
+        assert_eq!(parsed["smells"][0]["symbol"]["name"], "MainView");
+    }
+
+    #[test]
     fn get_module_summary_on_empty_graph() {
         let mut state = make_test_state();
         let result = handle_tool_call(&mut state, "get_module_summary", &json!({}));
@@ -643,6 +687,202 @@ mod tests {
             version: String::new(),
             nodes: vec![],
             edges: vec![],
+        };
+        let schema = tantivy::schema::Schema::builder().build();
+        let index = Index::create_in_ram(schema);
+        McpState {
+            graph,
+            search_index: index,
+            store_path: PathBuf::from("/tmp/test"),
+            recall: Recall::new(),
+        }
+    }
+
+    fn make_test_state_with_smells() -> McpState {
+        fn node(id: &str, name: &str, kind: NodeKind, file: &str) -> Node {
+            Node {
+                id: id.into(),
+                kind,
+                name: name.into(),
+                file: PathBuf::from(file),
+                span: Span {
+                    start: [1, 0],
+                    end: [10, 0],
+                },
+                visibility: Visibility::Public,
+                metadata: HashMap::new(),
+                role: None,
+                signature: None,
+                doc_comment: None,
+                module: Some("App".to_string()),
+                snippet: None,
+            }
+        }
+
+        fn edge(source: &str, target: &str, kind: EdgeKind) -> Edge {
+            Edge {
+                source: source.into(),
+                target: target.into(),
+                kind,
+                confidence: 1.0,
+                direction: None,
+                operation: None,
+                condition: None,
+                async_boundary: None,
+                provenance: vec![],
+            }
+        }
+
+        let graph = Graph {
+            version: String::new(),
+            nodes: vec![
+                node(
+                    "src/main.rs::MainView",
+                    "MainView",
+                    NodeKind::Struct,
+                    "src/main.rs",
+                ),
+                node(
+                    "src/main.rs::MainView::L1",
+                    "L1",
+                    NodeKind::View,
+                    "src/main.rs",
+                ),
+                node(
+                    "src/main.rs::MainView::L2",
+                    "L2",
+                    NodeKind::View,
+                    "src/main.rs",
+                ),
+                node(
+                    "src/main.rs::MainView::L3",
+                    "L3",
+                    NodeKind::View,
+                    "src/main.rs",
+                ),
+                node(
+                    "src/main.rs::MainView::L4",
+                    "L4",
+                    NodeKind::View,
+                    "src/main.rs",
+                ),
+                node(
+                    "src/main.rs::MainView::L5",
+                    "L5",
+                    NodeKind::View,
+                    "src/main.rs",
+                ),
+                node(
+                    "src/main.rs::MainView::L6",
+                    "L6",
+                    NodeKind::View,
+                    "src/main.rs",
+                ),
+                node(
+                    "src/other.rs::SecondaryView",
+                    "SecondaryView",
+                    NodeKind::Struct,
+                    "src/other.rs",
+                ),
+                node(
+                    "src/other.rs::SecondaryView::L1",
+                    "L1",
+                    NodeKind::View,
+                    "src/other.rs",
+                ),
+                node(
+                    "src/other.rs::SecondaryView::L2",
+                    "L2",
+                    NodeKind::View,
+                    "src/other.rs",
+                ),
+                node(
+                    "src/other.rs::SecondaryView::L3",
+                    "L3",
+                    NodeKind::View,
+                    "src/other.rs",
+                ),
+                node(
+                    "src/other.rs::SecondaryView::L4",
+                    "L4",
+                    NodeKind::View,
+                    "src/other.rs",
+                ),
+                node(
+                    "src/other.rs::SecondaryView::L5",
+                    "L5",
+                    NodeKind::View,
+                    "src/other.rs",
+                ),
+                node(
+                    "src/other.rs::SecondaryView::L6",
+                    "L6",
+                    NodeKind::View,
+                    "src/other.rs",
+                ),
+            ],
+            edges: vec![
+                edge(
+                    "src/main.rs::MainView",
+                    "src/main.rs::MainView::L1",
+                    EdgeKind::Contains,
+                ),
+                edge(
+                    "src/main.rs::MainView::L1",
+                    "src/main.rs::MainView::L2",
+                    EdgeKind::Contains,
+                ),
+                edge(
+                    "src/main.rs::MainView::L2",
+                    "src/main.rs::MainView::L3",
+                    EdgeKind::Contains,
+                ),
+                edge(
+                    "src/main.rs::MainView::L3",
+                    "src/main.rs::MainView::L4",
+                    EdgeKind::Contains,
+                ),
+                edge(
+                    "src/main.rs::MainView::L4",
+                    "src/main.rs::MainView::L5",
+                    EdgeKind::Contains,
+                ),
+                edge(
+                    "src/main.rs::MainView::L5",
+                    "src/main.rs::MainView::L6",
+                    EdgeKind::Contains,
+                ),
+                edge(
+                    "src/other.rs::SecondaryView",
+                    "src/other.rs::SecondaryView::L1",
+                    EdgeKind::Contains,
+                ),
+                edge(
+                    "src/other.rs::SecondaryView::L1",
+                    "src/other.rs::SecondaryView::L2",
+                    EdgeKind::Contains,
+                ),
+                edge(
+                    "src/other.rs::SecondaryView::L2",
+                    "src/other.rs::SecondaryView::L3",
+                    EdgeKind::Contains,
+                ),
+                edge(
+                    "src/other.rs::SecondaryView::L3",
+                    "src/other.rs::SecondaryView::L4",
+                    EdgeKind::Contains,
+                ),
+                edge(
+                    "src/other.rs::SecondaryView::L4",
+                    "src/other.rs::SecondaryView::L5",
+                    EdgeKind::Contains,
+                ),
+                edge(
+                    "src/other.rs::SecondaryView::L5",
+                    "src/other.rs::SecondaryView::L6",
+                    EdgeKind::Contains,
+                ),
+            ],
         };
         let schema = tantivy::schema::Schema::builder().build();
         let index = Index::create_in_ram(schema);

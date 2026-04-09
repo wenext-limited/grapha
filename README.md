@@ -77,6 +77,8 @@ grapha flow trace sendGift --direction reverse
 
 # Code smell detection
 grapha repo smells --module Room
+grapha repo smells --file Modules/Room/Sources/Room/View/RoomPage+Layout.swift
+grapha repo smells --symbol RoomPageCenterContentView
 
 # Module metrics — symbol counts, coupling ratios
 grapha repo modules
@@ -114,7 +116,7 @@ Add to `.mcp.json`:
 | `get_file_symbols` | All declarations in a file, by source position |
 | `batch_context` | Context for up to 20 symbols in one call |
 | `analyze_complexity` | Structural metrics + severity rating for any type |
-| `detect_smells` | Graph-wide code smell scan (god types, fan-out, nesting, etc.) |
+| `detect_smells` | Code smell scan scoped to the repo, a module, a file, or a symbol |
 | `get_module_summary` | Per-module metrics with cross-module coupling ratio |
 | `get_file_map` | File/symbol map organized by module and directory |
 | `reload` | Hot-reload graph from disk without restarting the server |
@@ -144,7 +146,7 @@ grapha flow entries                        # list auto-detected entry points
 ### Repository
 
 ```bash
-grapha repo smells [--module M]            # code smell detection
+grapha repo smells [--module M | --file PATH | --symbol QUERY]
 grapha repo modules                        # per-module metrics
 grapha repo map [--module M]               # file/symbol overview
 grapha repo changes [scope]                # git diff → affected symbols
