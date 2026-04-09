@@ -49,6 +49,26 @@ mod tests {
         }
     }
 
+    fn entry_node(id: &str, name: &str, file: &str, module: Option<&str>) -> Node {
+        Node {
+            id: id.into(),
+            kind: NodeKind::Function,
+            name: name.into(),
+            file: PathBuf::from(file),
+            span: Span {
+                start: [0, 0],
+                end: [1, 0],
+            },
+            visibility: Visibility::Public,
+            metadata: HashMap::new(),
+            role: Some(NodeRole::EntryPoint),
+            signature: None,
+            doc_comment: None,
+            module: module.map(str::to_string),
+            snippet: None,
+        }
+    }
+
     #[test]
     fn lists_entry_points() {
         let graph = Graph {
@@ -83,5 +103,39 @@ mod tests {
         let result = query_entries(&graph);
         assert_eq!(result.total, 0);
         assert!(result.entries.is_empty());
+    }
+
+    #[test]
+    fn filters_entries_by_module_and_file_and_limit() {
+        let graph = Graph {
+            version: "0.1.0".to_string(),
+            nodes: vec![
+                entry_node(
+                    "room_body",
+                    "body",
+                    "Modules/Room/Sources/Room/View/RoomPage.swift",
+                    Some("Room"),
+                ),
+                entry_node(
+                    "room_share",
+                    "onShare",
+                    "Modules/Room/Sources/Room/View/RoomPage.swift",
+                    Some("Room"),
+                ),
+                entry_node(
+                    "chat_body",
+                    "body",
+                    "Modules/Chat/Sources/Chat/View/ChatPage.swift",
+                    Some("Chat"),
+                ),
+            ],
+            edges: vec![],
+        };
+
+        let result = query_entries(&graph);
+
+        assert_eq!(result.total, 2);
+        assert_eq!(result.entries.len(), 1);
+        assert_eq!(result.entries[0].file, "RoomPage.swift");
     }
 }
