@@ -1,9 +1,11 @@
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Context;
 use grapha_core::graph::Graph;
+use serde::{Deserialize, Serialize};
 
 /// Returns `true` if `cache_path` exists and its modification time is
 /// greater than or equal to that of `source_path`.
@@ -54,6 +56,105 @@ impl GraphCache {
         fs::write(&self.cache_path, bytes)
             .with_context(|| format!("writing cache file {}", self.cache_path.display()))?;
         Ok(())
+    }
+}
+
+const QUERY_CACHE_FILENAME: &str = "query_cache.bin";
+const MAX_QUERY_CACHE_ENTRIES: usize = 64;
+
+#[derive(Serialize, Deserialize)]
+struct QueryCacheEntry {
+    db_mtime_secs: u64,
+    output: String,
+}
+
+/// Cache for serialized query output, keyed by a string and invalidated when
+/// the SQLite database changes.
+pub struct QueryCache {
+    cache_path: PathBuf,
+}
+
+fn mtime_secs(path: &Path) -> Option<u64> {
+    fs::metadata(path)
+        .ok()?
+        .modified()
+        .ok()?
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_secs())
+}
+
+impl QueryCache {
+    /// The cache file lives at `store_dir/query_cache.bin`.
+    pub fn new(store_dir: &Path) -> Self {
+        Self {
+            cache_path: store_dir.join(QUERY_CACHE_FILENAME),
+        }
+    }
+
+    fn load_entries(&self) -> HashMap<String, QueryCacheEntry> {
+        let Ok(bytes) = fs::read(&self.cache_path) else {
+            return HashMap::new();
+        };
+        bincode::deserialize(&bytes).unwrap_or_default()
+    }
+
+    /// Returns the cached output for `key` if the cache entry exists and the
+    /// database file has not changed since it was written.
+    pub fn get(&self, key: &str, db_path: &Path) -> Option<String> {
+        let current_mtime = mtime_secs(db_path)?;
+        let entries = self.load_entries();
+        let entry = entries.get(key)?;
+        if entry.db_mtime_secs == current_mtime {
+            Some(entry.output.clone())
+        } else {
+            None
+        }
+    }
+
+    /// Inserts or updates the cached output for `key`, evicting stale entries
+    /// and enforcing the maximum cache size.
+    pub fn put(&self, key: &str, db_path: &Path, output: &str) -> anyhow::Result<()> {
+        let current_mtime = mtime_secs(db_path).unwrap_or(0);
+
+        let mut entries = self.load_entries();
+
+        // Evict entries that belong to a different db mtime (stale after index).
+        entries.retain(|_, v| v.db_mtime_secs == current_mtime);
+
+        // If the cache is full, clear it rather than implementing LRU.
+        if entries.len() >= MAX_QUERY_CACHE_ENTRIES {
+            entries.clear();
+        }
+
+        entries.insert(
+            key.to_owned(),
+            QueryCacheEntry {
+                db_mtime_secs: current_mtime,
+                output: output.to_owned(),
+            },
+        );
+
+        if let Some(parent) = self.cache_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let bytes =
+            bincode::serialize(&entries).context("serialising query cache to bincode")?;
+        fs::write(&self.cache_path, bytes)
+            .with_context(|| format!("writing query cache {}", self.cache_path.display()))?;
+        Ok(())
+    }
+
+    /// Removes the cache file so the next query rebuilds it from scratch.
+    pub fn invalidate(&self) {
+        let _ = fs::remove_file(&self.cache_path);
+    }
+}
+
+impl GraphCache {
+    /// Removes the cache file so the next load rebuilds from SQLite.
+    pub fn invalidate(&self) {
+        let _ = fs::remove_file(&self.cache_path);
     }
 }
 
@@ -131,5 +232,53 @@ mod tests {
 
         // load() should return an error because the file doesn't exist.
         assert!(gc.load().is_err());
+    }
+
+    // ── QueryCache ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn query_cache_hit_returns_cached_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("grapha.db");
+        fs::write(&db_path, b"db").unwrap();
+
+        let qc = QueryCache::new(dir.path());
+
+        qc.put("my_key", &db_path, "hello world").unwrap();
+
+        let result = qc.get("my_key", &db_path);
+        assert_eq!(result.as_deref(), Some("hello world"));
+    }
+
+    #[test]
+    fn query_cache_miss_when_db_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("grapha.db");
+        fs::write(&db_path, b"db v1").unwrap();
+
+        let qc = QueryCache::new(dir.path());
+        qc.put("key", &db_path, "cached output").unwrap();
+
+        // Ensure enough time passes for the filesystem mtime to differ.
+        thread::sleep(Duration::from_secs(1));
+        fs::write(&db_path, b"db v2").unwrap();
+
+        let result = qc.get("key", &db_path);
+        assert!(result.is_none(), "cache should be invalidated after db write");
+    }
+
+    #[test]
+    fn query_cache_different_keys_are_independent() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("grapha.db");
+        fs::write(&db_path, b"db").unwrap();
+
+        let qc = QueryCache::new(dir.path());
+
+        qc.put("key_a", &db_path, "output_a").unwrap();
+        qc.put("key_b", &db_path, "output_b").unwrap();
+
+        assert_eq!(qc.get("key_a", &db_path).as_deref(), Some("output_a"));
+        assert_eq!(qc.get("key_b", &db_path).as_deref(), Some("output_b"));
     }
 }

@@ -707,10 +707,26 @@ fn run_pipeline(
 }
 
 fn load_graph(path: &Path) -> anyhow::Result<grapha_core::graph::Graph> {
-    let db_path = path.join(".grapha/grapha.db");
+    let store_dir = path.join(".grapha");
+    let db_path = store_dir.join("grapha.db");
+
+    let graph_cache = cache::GraphCache::new(&store_dir);
+    if graph_cache.is_fresh(&db_path) && let Ok(graph) = graph_cache.load() {
+        return Ok(graph);
+    }
+
     let s = store::sqlite::SqliteStore::new(db_path);
-    s.load()
-        .context("no index found — run `grapha index` first")
+    let graph = s
+        .load()
+        .context("no index found — run `grapha index` first")?;
+
+    let _ = graph_cache.save(&graph);
+
+    Ok(graph)
+}
+
+fn query_cache_key(parts: &[&str]) -> String {
+    parts.join("\0")
 }
 
 fn load_graph_for_l10n(path: &Path) -> anyhow::Result<grapha_core::graph::Graph> {
@@ -1039,6 +1055,11 @@ fn handle_index(
         (localize_elapsed, localize_stats),
         (assets_elapsed, assets_stats),
     ) = save_result?;
+
+    // Invalidate stale binary caches now that the SQLite DB has been updated.
+    cache::GraphCache::new(&store_path).invalidate();
+    cache::QueryCache::new(&store_path).invalidate();
+
     progress::done_elapsed(
         &format!(
             "saved to {} ({}; {})",
@@ -1293,6 +1314,19 @@ fn handle_l10n_command(
             format,
             fields,
         } => {
+            let store_dir = path.join(".grapha");
+            let db_path = store_dir.join("grapha.db");
+            let query_cache = cache::QueryCache::new(&store_dir);
+            let format_key = format!("{format:?}");
+            let fields_key = fields.as_deref().unwrap_or("");
+            let cache_key =
+                query_cache_key(&["l10n", "symbol", &symbol, &format_key, fields_key]);
+
+            if let Some(cached) = query_cache.get(&cache_key, &db_path) {
+                print!("{cached}");
+                return Ok(());
+            }
+
             let render_options = render_options.with_fields(resolve_field_set(&fields, &path));
             let graph = load_graph_for_l10n(&path)?;
             let catalogs = localization::load_catalog_index(&path)?;
@@ -1300,12 +1334,21 @@ fn handle_l10n_command(
                 query::localize::query_localize(&graph, &catalogs, &symbol),
                 "symbol",
             )?;
-            print_query_result(
-                &result,
-                format,
-                render_options,
-                render::render_localize_with_options,
-            )
+
+            let output = match format {
+                QueryOutputFormat::Json => {
+                    let s = serde_json::to_string_pretty(&result)?;
+                    println!("{s}");
+                    format!("{s}\n")
+                }
+                QueryOutputFormat::Tree => {
+                    let s = render::render_localize_with_options(&result, render_options);
+                    println!("{s}");
+                    format!("{s}\n")
+                }
+            };
+            let _ = query_cache.put(&cache_key, &db_path, &output);
+            Ok(())
         }
         L10nCommands::Usages {
             key,
@@ -1314,16 +1357,39 @@ fn handle_l10n_command(
             format,
             fields,
         } => {
+            let store_dir = path.join(".grapha");
+            let db_path = store_dir.join("grapha.db");
+            let query_cache = cache::QueryCache::new(&store_dir);
+            let format_key = format!("{format:?}");
+            let table_key = table.as_deref().unwrap_or("");
+            let fields_key = fields.as_deref().unwrap_or("");
+            let cache_key =
+                query_cache_key(&["l10n", "usages", &key, table_key, &format_key, fields_key]);
+
+            if let Some(cached) = query_cache.get(&cache_key, &db_path) {
+                print!("{cached}");
+                return Ok(());
+            }
+
             let render_options = render_options.with_fields(resolve_field_set(&fields, &path));
             let graph = load_graph_for_l10n(&path)?;
             let catalogs = localization::load_catalog_index(&path)?;
             let result = query::usages::query_usages(&graph, &catalogs, &key, table.as_deref());
-            print_query_result(
-                &result,
-                format,
-                render_options,
-                render::render_usages_with_options,
-            )
+
+            let output = match format {
+                QueryOutputFormat::Json => {
+                    let s = serde_json::to_string_pretty(&result)?;
+                    println!("{s}");
+                    format!("{s}\n")
+                }
+                QueryOutputFormat::Tree => {
+                    let s = render::render_usages_with_options(&result, render_options);
+                    println!("{s}");
+                    format!("{s}\n")
+                }
+            };
+            let _ = query_cache.put(&cache_key, &db_path, &output);
+            Ok(())
         }
     }
 }
