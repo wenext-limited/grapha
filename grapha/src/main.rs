@@ -310,6 +310,15 @@ enum FlowCommands {
         /// Project directory
         #[arg(short, long, default_value = ".")]
         path: PathBuf,
+        /// Filter entry points by module name
+        #[arg(long)]
+        module: Option<String>,
+        /// Filter entry points by file path or suffix
+        #[arg(long)]
+        file: Option<String>,
+        /// Limit the number of shown entries
+        #[arg(long)]
+        limit: Option<usize>,
         /// Output format
         #[arg(long, value_enum, default_value_t = QueryOutputFormat::Json)]
         format: QueryOutputFormat,
@@ -1390,6 +1399,9 @@ fn handle_flow_command(
         }
         FlowCommands::Entries {
             path,
+            module,
+            file,
+            limit,
             format,
             fields,
         } => {
@@ -1398,7 +1410,16 @@ fn handle_flow_command(
                 &path,
                 format,
                 render_options,
-                query::entries::query_entries,
+                move |graph| {
+                    query::entries::query_entries_with_options(
+                        graph,
+                        &query::entries::EntriesQueryOptions {
+                            module,
+                            file,
+                            limit,
+                        },
+                    )
+                },
                 render::render_entries_with_options,
             )
         }

@@ -450,6 +450,21 @@ fn format_section_count(label: &str, count: usize, options: RenderOptions) -> St
     )
 }
 
+fn format_section_progress(
+    label: &str,
+    shown: usize,
+    total: usize,
+    options: RenderOptions,
+) -> String {
+    let palette = Palette::new(options);
+    format!(
+        "{} ({} shown / {} total)",
+        palette.section_header(label),
+        palette.number(shown),
+        palette.number(total),
+    )
+}
+
 fn format_summary(parts: &[(&str, String)], options: RenderOptions) -> String {
     let palette = Palette::new(options);
     let rendered = parts
@@ -651,7 +666,7 @@ pub fn render_entries_with_options(result: &EntriesResult, options: RenderOption
         .collect();
 
     render_tree(&TreeNode::branch(
-        format_section_count("entry points", result.total, options),
+        format_section_progress("entry points", result.shown, result.total, options),
         children,
     ))
 }
@@ -1452,11 +1467,12 @@ mod tests {
                 symbol_ref("boot", NodeKind::Function, "boot.rs"),
                 symbol_ref("main", NodeKind::Function, "main.rs"),
             ],
+            shown: 2,
             total: 2,
         };
 
         let rendered = render_entries_with_options(&result, RenderOptions::plain());
-        assert!(rendered.contains("entry points (2)"));
+        assert!(rendered.contains("entry points (2 shown / 2 total)"));
         assert!(rendered.contains("boot [function] (boot.rs)"));
         assert!(rendered.contains("main [function] (main.rs)"));
     }
@@ -1468,6 +1484,7 @@ mod tests {
                 symbol_ref("boot", NodeKind::Function, "boot.rs"),
                 symbol_ref("main", NodeKind::Function, "main.rs"),
             ],
+            shown: 2,
             total: 2,
         };
 

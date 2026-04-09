@@ -2,24 +2,69 @@ use serde::Serialize;
 
 use grapha_core::graph::{Graph, NodeRole};
 
-use super::SymbolRef;
+use super::{SymbolRef, file_matches_query_path};
+
+#[derive(Debug, Clone, Default)]
+pub struct EntriesQueryOptions {
+    pub module: Option<String>,
+    pub file: Option<String>,
+    pub limit: Option<usize>,
+}
 
 #[derive(Debug, Serialize)]
 pub struct EntriesResult {
     pub entries: Vec<SymbolRef>,
+    pub shown: usize,
     pub total: usize,
 }
 
-pub fn query_entries(graph: &Graph) -> EntriesResult {
-    let entries: Vec<SymbolRef> = graph
+fn sort_entries(entries: &mut [SymbolRef]) {
+    entries.sort_by(|left, right| {
+        left.module
+            .as_deref()
+            .unwrap_or("")
+            .cmp(right.module.as_deref().unwrap_or(""))
+            .then_with(|| left.file.cmp(&right.file))
+            .then_with(|| left.name.cmp(&right.name))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+}
+
+pub fn query_entries_with_options(graph: &Graph, options: &EntriesQueryOptions) -> EntriesResult {
+    let mut entries: Vec<SymbolRef> = graph
         .nodes
         .iter()
         .filter(|n| n.role == Some(NodeRole::EntryPoint))
+        .filter(|node| {
+            options
+                .module
+                .as_deref()
+                .map_or(true, |module| node.module.as_deref() == Some(module))
+        })
+        .filter(|node| {
+            options
+                .file
+                .as_deref()
+                .map_or(true, |file_query| file_matches_query_path(&node.file, file_query))
+        })
         .map(SymbolRef::from_node)
         .collect();
 
+    sort_entries(&mut entries);
+
     let total = entries.len();
-    EntriesResult { entries, total }
+    let shown = options.limit.map(|limit| limit.min(total)).unwrap_or(total);
+    entries.truncate(shown);
+
+    EntriesResult {
+        entries,
+        shown,
+        total,
+    }
+}
+
+pub fn query_entries(graph: &Graph) -> EntriesResult {
+    query_entries_with_options(graph, &EntriesQueryOptions::default())
 }
 
 #[cfg(test)]
@@ -132,7 +177,14 @@ mod tests {
             edges: vec![],
         };
 
-        let result = query_entries(&graph);
+        let result = query_entries_with_options(
+            &graph,
+            &EntriesQueryOptions {
+                module: Some("Room".to_string()),
+                file: Some("RoomPage.swift".to_string()),
+                limit: Some(1),
+            },
+        );
         let actual: Vec<(&str, &str, &str, Option<&str>)> = result
             .entries
             .iter()
@@ -153,5 +205,6 @@ mod tests {
 
         assert_eq!(actual, expected);
         assert_eq!(result.total, 2);
+        assert_eq!(result.shown, 1);
     }
 }
