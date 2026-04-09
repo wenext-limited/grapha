@@ -70,6 +70,36 @@ pub(crate) fn normalize_symbol_name(name: &str) -> &str {
         .unwrap_or(without_accessor)
 }
 
+pub(crate) fn file_matches_query_path(node_file: &std::path::Path, file_query: &str) -> bool {
+    let normalize = |value: &str| value.replace('\\', "/");
+
+    let file = normalize(&node_file.to_string_lossy());
+    let query = normalize(file_query);
+
+    if file == query || file.ends_with(&query) || file.contains(&query) || query.ends_with(&file) {
+        return true;
+    }
+
+    let file_name = file.rsplit('/').next().unwrap_or(file.as_str());
+    let query_name = query.rsplit('/').next().unwrap_or(query.as_str());
+    file_name == query_name
+}
+
+pub(crate) fn file_matches_path_or_suffix(node_file: &std::path::Path, file_query: &str) -> bool {
+    let normalize = |value: &str| value.replace('\\', "/");
+
+    let file = normalize(&node_file.to_string_lossy());
+    let query = normalize(file_query);
+
+    if file == query || file.ends_with(&query) || query.ends_with(&file) {
+        return true;
+    }
+
+    let file_name = file.rsplit('/').next().unwrap_or(file.as_str());
+    let query_name = query.rsplit('/').next().unwrap_or(query.as_str());
+    file_name == query_name
+}
+
 pub(crate) fn is_swiftui_invalidation_source(node: &Node) -> bool {
     node.metadata
         .get("swiftui.invalidation_source")
@@ -597,5 +627,17 @@ mod tests {
         let resolved = resolve_node(&graph, "ModuleExport::Hello.swift::Test::hello(name:)")
             .expect("locator should resolve");
         assert_eq!(resolved.id, "method-id");
+    }
+
+    #[test]
+    fn strict_file_match_requires_full_path_or_suffix() {
+        let node_file = PathBuf::from("Modules/Room/Sources/Room/View/RoomPage.swift");
+
+        assert!(file_matches_path_or_suffix(&node_file, "RoomPage.swift"));
+        assert!(file_matches_path_or_suffix(
+            &node_file,
+            "Modules/Room/Sources/Room/View/RoomPage.swift"
+        ));
+        assert!(!file_matches_path_or_suffix(&node_file, "Page"));
     }
 }

@@ -451,8 +451,88 @@ fn trace_tree_format_works() {
         .assert()
         .success()
         .stdout(predicate::str::contains("main [function] (main.rs)"))
+        .stdout(predicate::str::contains("requested_symbol: main"))
+        .stdout(predicate::str::contains("traced_roots: main"))
+        .stdout(predicate::str::contains("fallback_used: false"))
         .stdout(predicate::str::contains(
             "summary: flows=0, reads=0, writes=0, async_crossings=0",
+        ))
+        .stdout(predicate::str::contains("flows (0)"));
+}
+
+#[test]
+fn flow_trace_swiftui_view_falls_back_to_body_or_actions() {
+    let dir = tempfile::tempdir().unwrap();
+    let store_dir = dir.path().join(".grapha");
+
+    std::fs::write(
+        dir.path().join("RoomPageCenterContentView.swift"),
+        r#"
+        import SwiftUI
+
+        struct RoomPageCenterContentView: View {
+            var body: some View {
+                Button("Share") {
+                    onShare()
+                }
+            }
+
+            func onShare() {
+                save()
+            }
+
+            func save() {
+                UserDefaults.standard.set(true, forKey: "shared")
+            }
+        }
+        "#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("grapha.toml"),
+        r#"
+        [[classifiers]]
+        regex = "save"
+        terminal = "persistence"
+        direction = "write"
+        operation = "save"
+        "#,
+    )
+    .unwrap();
+
+    grapha()
+        .args([
+            "index",
+            dir.path().to_str().unwrap(),
+            "--store-dir",
+            store_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    grapha()
+        .args([
+            "flow",
+            "trace",
+            "RoomPageCenterContentView",
+            "-p",
+            dir.path().to_str().unwrap(),
+            "--format",
+            "tree",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "RoomPageCenterContentView [struct] (RoomPageCenterContentView.swift)",
+        ))
+        .stdout(predicate::str::contains(
+            "requested_symbol: RoomPageCenterContentView",
+        ))
+        .stdout(predicate::str::contains("fallback_used: true"))
+        .stdout(predicate::str::contains("traced_roots:"))
+        .stdout(predicate::str::contains("onShare"))
+        .stdout(predicate::str::contains(
+            "hint: no dataflow edges were found from this symbol or its local SwiftUI roots",
         ))
         .stdout(predicate::str::contains("flows (0)"));
 }

@@ -2,7 +2,7 @@ use serde::Serialize;
 
 use grapha_core::graph::{Graph, NodeRole};
 
-use super::{SymbolRef, file_matches_query_path};
+use super::{SymbolRef, file_matches_path_or_suffix};
 
 #[derive(Debug, Clone, Default)]
 pub struct EntriesQueryOptions {
@@ -39,13 +39,13 @@ pub fn query_entries_with_options(graph: &Graph, options: &EntriesQueryOptions) 
             options
                 .module
                 .as_deref()
-                .map_or(true, |module| node.module.as_deref() == Some(module))
+                .is_none_or(|module| node.module.as_deref() == Some(module))
         })
         .filter(|node| {
             options
                 .file
                 .as_deref()
-                .map_or(true, |file_query| file_matches_query_path(&node.file, file_query))
+                .is_none_or(|file_query| file_matches_path_or_suffix(&node.file, file_query))
         })
         .map(SymbolRef::from_node)
         .collect();
@@ -192,11 +192,7 @@ mod tests {
                 (
                     entry.id.as_str(),
                     entry.name.as_str(),
-                    entry
-                        .file
-                        .rsplit('/')
-                        .next()
-                        .unwrap_or(entry.file.as_str()),
+                    entry.file.rsplit('/').next().unwrap_or(entry.file.as_str()),
                     entry.module.as_deref(),
                 )
             })
@@ -206,5 +202,31 @@ mod tests {
         assert_eq!(actual, expected);
         assert_eq!(result.total, 2);
         assert_eq!(result.shown, 1);
+    }
+
+    #[test]
+    fn file_filter_does_not_match_partial_fragments() {
+        let graph = Graph {
+            version: "0.1.0".to_string(),
+            nodes: vec![entry_node(
+                "room_body",
+                "body",
+                "Modules/Room/Sources/Room/View/RoomPage.swift",
+                Some("Room"),
+            )],
+            edges: vec![],
+        };
+
+        let result = query_entries_with_options(
+            &graph,
+            &EntriesQueryOptions {
+                file: Some("Page".to_string()),
+                ..EntriesQueryOptions::default()
+            },
+        );
+
+        assert_eq!(result.total, 0);
+        assert_eq!(result.shown, 0);
+        assert!(result.entries.is_empty());
     }
 }

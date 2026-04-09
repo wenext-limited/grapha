@@ -2,14 +2,19 @@ use std::collections::{HashMap, HashSet};
 
 use serde::Serialize;
 
-use grapha_core::graph::{EdgeKind, FlowDirection, Graph, NodeRole};
+use grapha_core::graph::{EdgeKind, FlowDirection, Graph, Node, NodeRole};
 
 use super::flow::{is_dataflow_edge, terminal_kind_to_string};
-use super::{QueryResolveError, SymbolRef};
+use super::{QueryResolveError, SymbolRef, normalize_symbol_name};
 
 #[derive(Debug, Serialize)]
 pub struct TraceResult {
     pub entry: String,
+    pub requested_symbol: String,
+    pub traced_roots: Vec<String>,
+    pub fallback_used: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
     pub flows: Vec<Flow>,
     pub summary: TraceSummary,
     #[serde(skip)]
@@ -55,36 +60,46 @@ fn direction_from_edge(edge_kind: EdgeKind, direction: Option<&FlowDirection>) -
     }
 }
 
-pub fn query_trace(
-    graph: &Graph,
-    entry: &str,
-    max_depth: usize,
-) -> Result<TraceResult, QueryResolveError> {
-    let entry_node = crate::query::resolve_node(graph, entry)?;
+fn summarize_flows(flows: &[Flow]) -> TraceSummary {
+    let mut reads = 0;
+    let mut writes = 0;
+    let mut async_crossings = 0;
 
-    let node_index: HashMap<&str, usize> = graph
-        .nodes
-        .iter()
-        .enumerate()
-        .map(|(i, n)| (n.id.as_str(), i))
-        .collect();
-
-    // Build forward adjacency: source -> [(target_id, edge_index)]
-    let mut forward_adj: HashMap<&str, Vec<(&str, usize)>> = HashMap::new();
-    for (ei, edge) in graph.edges.iter().enumerate() {
-        if is_dataflow_edge(edge.kind) {
-            forward_adj
-                .entry(&edge.source)
-                .or_default()
-                .push((&edge.target, ei));
+    for flow in flows {
+        if let Some(terminal) = &flow.terminal {
+            match terminal.direction.as_str() {
+                "read" => reads += 1,
+                "write" => writes += 1,
+                "read_write" => {
+                    reads += 1;
+                    writes += 1;
+                }
+                _ => {}
+            }
         }
+        async_crossings += flow.async_boundaries.len();
     }
 
-    let mut flows = Vec::new();
-    let mut total_async_crossings = 0;
+    TraceSummary {
+        total_flows: flows.len(),
+        reads,
+        writes,
+        async_crossings,
+    }
+}
 
-    // DFS with explicit stack
-    // Stack items: (node_id, path, conditions, async_boundaries, visited_edge_pairs)
+fn trace_from_root<'a>(
+    graph: &'a Graph,
+    root_id: &'a str,
+    max_depth: usize,
+    node_index: &HashMap<&'a str, usize>,
+    forward_adj: &HashMap<&'a str, Vec<(&'a str, usize)>>,
+) -> Vec<Flow> {
+    let Some(&root_index) = node_index.get(root_id) else {
+        return Vec::new();
+    };
+    let root_node = &graph.nodes[root_index];
+
     struct StackFrame<'a> {
         node_id: &'a str,
         path: Vec<String>,
@@ -93,9 +108,10 @@ pub fn query_trace(
         visited_edges: HashSet<(&'a str, &'a str)>,
     }
 
+    let mut flows = Vec::new();
     let mut stack: Vec<StackFrame> = vec![StackFrame {
-        node_id: &entry_node.id,
-        path: vec![entry_node.name.clone()],
+        node_id: root_id,
+        path: vec![root_node.name.clone()],
         conditions: Vec::new(),
         async_boundaries: Vec::new(),
         visited_edges: HashSet::new(),
@@ -106,13 +122,11 @@ pub fn query_trace(
             continue;
         }
 
-        // Check if current node is a terminal (but not the entry itself)
         if frame.path.len() > 1
             && let Some(&ni) = node_index.get(frame.node_id)
         {
             let node = &graph.nodes[ni];
             if let Some(NodeRole::Terminal { kind }) = &node.role {
-                // Determine direction from the last edge that led here
                 let last_edge_direction = graph
                     .edges
                     .iter()
@@ -138,7 +152,6 @@ pub fn query_trace(
             }
         }
 
-        // Continue traversal
         if let Some(neighbors) = forward_adj.get(frame.node_id) {
             for &(target_id, ei) in neighbors {
                 let edge_pair = (frame.node_id, target_id);
@@ -148,7 +161,6 @@ pub fn query_trace(
 
                 let edge = &graph.edges[ei];
                 let target_node = node_index.get(target_id).map(|&i| &graph.nodes[i]);
-
                 let target_name = target_node
                     .map(|n| n.name.clone())
                     .unwrap_or_else(|| target_id.to_string());
@@ -163,8 +175,7 @@ pub fn query_trace(
 
                 let mut new_async = frame.async_boundaries.clone();
                 if edge.async_boundary == Some(true) {
-                    let boundary_label = format!("{} -> {}", frame.node_id, target_id);
-                    new_async.push(boundary_label);
+                    new_async.push(format!("{} -> {}", frame.node_id, target_id));
                 }
 
                 let mut new_visited = frame.visited_edges.clone();
@@ -181,35 +192,166 @@ pub fn query_trace(
         }
     }
 
-    // Compute summary
-    let mut reads = 0;
-    let mut writes = 0;
-    for flow in &flows {
-        if let Some(terminal) = &flow.terminal {
-            match terminal.direction.as_str() {
-                "read" => reads += 1,
-                "write" => writes += 1,
-                "read_write" => {
-                    reads += 1;
-                    writes += 1;
+    flows
+}
+
+fn fallback_trace_roots<'a>(
+    graph: &'a Graph,
+    requested: &'a Node,
+    node_index: &HashMap<&'a str, usize>,
+    forward_adj: &HashMap<&'a str, Vec<(&'a str, usize)>>,
+) -> Vec<&'a Node> {
+    let mut ranked_roots: Vec<(usize, &'a str, &'a Node)> = graph
+        .edges
+        .iter()
+        .filter_map(|edge| {
+            let candidate = match edge.kind {
+                EdgeKind::Contains if edge.source == requested.id => {
+                    let child_index = node_index.get(edge.target.as_str())?;
+                    &graph.nodes[*child_index]
                 }
-                _ => {}
+                EdgeKind::Implements if edge.target == requested.id => {
+                    let child_index = node_index.get(edge.source.as_str())?;
+                    &graph.nodes[*child_index]
+                }
+                EdgeKind::TypeRef if edge.source == requested.id => {
+                    let child_index = node_index.get(edge.target.as_str())?;
+                    &graph.nodes[*child_index]
+                }
+                _ => return None,
+            };
+
+            if candidate.file != requested.file {
+                return None;
             }
+
+            let is_body = normalize_symbol_name(&candidate.name) == "body";
+            let is_action = matches!(candidate.kind, grapha_core::graph::NodeKind::Function)
+                && matches!(
+                    normalize_symbol_name(&candidate.name),
+                    name if name.starts_with("on")
+                        || name.starts_with("handle")
+                        || name.starts_with("did")
+                        || name.starts_with("go")
+                        || name.starts_with("goto")
+                );
+            let has_dataflow_edges = forward_adj
+                .get(candidate.id.as_str())
+                .is_some_and(|edges| !edges.is_empty());
+
+            let priority = if is_body {
+                Some(0)
+            } else if is_action {
+                Some(1)
+            } else if has_dataflow_edges {
+                Some(2)
+            } else {
+                None
+            }?;
+
+            Some((priority, candidate.name.as_str(), candidate))
+        })
+        .collect();
+
+    ranked_roots.sort_by(|left, right| {
+        left.0
+            .cmp(&right.0)
+            .then_with(|| left.1.cmp(right.1))
+            .then_with(|| left.2.id.cmp(&right.2.id))
+    });
+
+    let mut roots = Vec::new();
+    let mut seen = HashSet::new();
+    for (_, _, child) in ranked_roots {
+        if seen.insert(child.id.as_str()) {
+            roots.push(child);
         }
-        total_async_crossings += flow.async_boundaries.len();
     }
 
-    let summary = TraceSummary {
-        total_flows: flows.len(),
-        reads,
-        writes,
-        async_crossings: total_async_crossings,
+    roots
+}
+
+pub fn query_trace(
+    graph: &Graph,
+    entry: &str,
+    max_depth: usize,
+) -> Result<TraceResult, QueryResolveError> {
+    let entry_node = crate::query::resolve_node(graph, entry)?;
+
+    let node_index: HashMap<&str, usize> = graph
+        .nodes
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (n.id.as_str(), i))
+        .collect();
+
+    // Build forward adjacency: source -> [(target_id, edge_index)]
+    let mut forward_adj: HashMap<&str, Vec<(&str, usize)>> = HashMap::new();
+    for (ei, edge) in graph.edges.iter().enumerate() {
+        if is_dataflow_edge(edge.kind) {
+            forward_adj
+                .entry(&edge.source)
+                .or_default()
+                .push((&edge.target, ei));
+        }
+    }
+    let direct_flows = trace_from_root(
+        graph,
+        entry_node.id.as_str(),
+        max_depth,
+        &node_index,
+        &forward_adj,
+    );
+    if !direct_flows.is_empty() {
+        let summary = summarize_flows(&direct_flows);
+        return Ok(TraceResult {
+            entry: entry_node.id.clone(),
+            requested_symbol: entry_node.name.clone(),
+            traced_roots: vec![entry_node.name.clone()],
+            fallback_used: false,
+            hint: None,
+            flows: direct_flows,
+            summary,
+            entry_ref: SymbolRef::from_node(entry_node),
+        });
+    }
+
+    let fallback_roots = fallback_trace_roots(graph, entry_node, &node_index, &forward_adj);
+    let fallback_used = !fallback_roots.is_empty();
+    let traced_roots: Vec<String> = if fallback_used {
+        fallback_roots
+            .iter()
+            .map(|node| node.name.clone())
+            .collect()
+    } else {
+        vec![entry_node.name.clone()]
+    };
+
+    let mut flows = Vec::new();
+    for root in &fallback_roots {
+        flows.extend(trace_from_root(
+            graph,
+            root.id.as_str(),
+            max_depth,
+            &node_index,
+            &forward_adj,
+        ));
+    }
+
+    let hint = if fallback_used && flows.is_empty() {
+        Some("no dataflow edges were found from this symbol or its local SwiftUI roots".to_string())
+    } else {
+        None
     };
 
     Ok(TraceResult {
         entry: entry_node.id.clone(),
+        requested_symbol: entry_node.name.clone(),
+        traced_roots,
+        fallback_used,
+        hint,
+        summary: summarize_flows(&flows),
         flows,
-        summary,
         entry_ref: SymbolRef::from_node(entry_node),
     })
 }
@@ -279,6 +421,10 @@ mod tests {
 
         let result = query_trace(&graph, "entry", 10).unwrap();
         assert_eq!(result.entry, "entry");
+        assert_eq!(result.requested_symbol, "entry");
+        assert_eq!(result.traced_roots, vec!["entry"]);
+        assert!(!result.fallback_used);
+        assert!(result.hint.is_none());
         assert_eq!(result.flows.len(), 1);
 
         let flow = &result.flows[0];
@@ -388,6 +534,10 @@ mod tests {
         let result = query_trace(&graph, "body", 10).unwrap();
         assert!(result.flows.is_empty());
         assert_eq!(result.summary.total_flows, 0);
+        assert_eq!(result.requested_symbol, "body");
+        assert_eq!(result.traced_roots, vec!["body"]);
+        assert!(!result.fallback_used);
+        assert!(result.hint.is_none());
     }
 
     #[test]
@@ -452,5 +602,295 @@ mod tests {
         let result = query_trace(&graph, "entry", 10).unwrap();
         assert_eq!(result.summary.async_crossings, 1);
         assert_eq!(result.flows[0].async_boundaries.len(), 1);
+    }
+
+    #[test]
+    fn trace_falls_back_to_contained_action_when_view_root_has_no_direct_flows() {
+        let graph = Graph {
+            version: "0.1.0".to_string(),
+            nodes: vec![
+                Node {
+                    id: "room_view".into(),
+                    kind: NodeKind::Struct,
+                    name: "RoomPageCenterContentView".into(),
+                    file: PathBuf::from("RoomPageCenterContentView.swift"),
+                    span: Span {
+                        start: [0, 0],
+                        end: [1, 0],
+                    },
+                    visibility: Visibility::Public,
+                    metadata: StdHashMap::new(),
+                    role: None,
+                    signature: None,
+                    doc_comment: None,
+                    module: None,
+                    snippet: None,
+                },
+                Node {
+                    id: "room_body".into(),
+                    kind: NodeKind::Property,
+                    name: "body".into(),
+                    file: PathBuf::from("RoomPageCenterContentView.swift"),
+                    span: Span {
+                        start: [1, 0],
+                        end: [4, 0],
+                    },
+                    visibility: Visibility::Public,
+                    metadata: StdHashMap::new(),
+                    role: None,
+                    signature: Some("var body: some View".into()),
+                    doc_comment: None,
+                    module: None,
+                    snippet: None,
+                },
+                Node {
+                    id: "room_share".into(),
+                    kind: NodeKind::Function,
+                    name: "onShare()".into(),
+                    file: PathBuf::from("RoomPageCenterContentView.swift"),
+                    span: Span {
+                        start: [5, 0],
+                        end: [8, 0],
+                    },
+                    visibility: Visibility::Public,
+                    metadata: StdHashMap::new(),
+                    role: None,
+                    signature: Some("func onShare()".into()),
+                    doc_comment: None,
+                    module: None,
+                    snippet: None,
+                },
+                make_node(
+                    "save_terminal",
+                    Some(NodeRole::Terminal {
+                        kind: TerminalKind::Persistence,
+                    }),
+                ),
+            ],
+            edges: vec![
+                make_edge("room_view", "room_body", EdgeKind::Contains),
+                make_edge("room_view", "room_share", EdgeKind::Contains),
+                {
+                    let mut e = make_edge("room_share", "save_terminal", EdgeKind::Writes);
+                    e.direction = Some(FlowDirection::Write);
+                    e.operation = Some("save".to_string());
+                    e
+                },
+            ],
+        };
+
+        let result = query_trace(&graph, "RoomPageCenterContentView", 10).unwrap();
+        assert_eq!(result.requested_symbol, "RoomPageCenterContentView");
+        assert!(result.fallback_used);
+        assert_eq!(result.traced_roots, vec!["body", "onShare()"]);
+        assert!(result.hint.is_none());
+        assert_eq!(result.summary.total_flows, 1);
+        assert_eq!(result.flows.len(), 1);
+        assert_eq!(
+            result.flows[0].path,
+            vec!["onShare()".to_string(), "save_terminal".to_string()]
+        );
+        assert_eq!(result.summary.writes, 1);
+    }
+
+    #[test]
+    fn trace_returns_hint_when_fallback_roots_have_no_flows() {
+        let graph = Graph {
+            version: "0.1.0".to_string(),
+            nodes: vec![
+                Node {
+                    id: "room_view".into(),
+                    kind: NodeKind::Struct,
+                    name: "RoomPageCenterContentView".into(),
+                    file: PathBuf::from("RoomPageCenterContentView.swift"),
+                    span: Span {
+                        start: [0, 0],
+                        end: [1, 0],
+                    },
+                    visibility: Visibility::Public,
+                    metadata: StdHashMap::new(),
+                    role: None,
+                    signature: None,
+                    doc_comment: None,
+                    module: None,
+                    snippet: None,
+                },
+                Node {
+                    id: "room_body".into(),
+                    kind: NodeKind::Property,
+                    name: "body".into(),
+                    file: PathBuf::from("RoomPageCenterContentView.swift"),
+                    span: Span {
+                        start: [1, 0],
+                        end: [4, 0],
+                    },
+                    visibility: Visibility::Public,
+                    metadata: StdHashMap::new(),
+                    role: None,
+                    signature: Some("var body: some View".into()),
+                    doc_comment: None,
+                    module: None,
+                    snippet: None,
+                },
+            ],
+            edges: vec![Edge {
+                source: "room_view".into(),
+                target: "room_body".into(),
+                kind: EdgeKind::Contains,
+                confidence: 1.0,
+                direction: None,
+                operation: None,
+                condition: None,
+                async_boundary: None,
+                provenance: Vec::new(),
+            }],
+        };
+
+        let result = query_trace(&graph, "RoomPageCenterContentView", 10).unwrap();
+        assert!(result.fallback_used);
+        assert_eq!(result.traced_roots, vec!["body"]);
+        assert_eq!(result.summary.total_flows, 0);
+        assert_eq!(
+            result.hint.as_deref(),
+            Some("no dataflow edges were found from this symbol or its local SwiftUI roots")
+        );
+    }
+
+    #[test]
+    fn trace_falls_back_to_swiftui_implementors_and_body_getter_roots() {
+        let graph = Graph {
+            version: "0.1.0".to_string(),
+            nodes: vec![
+                Node {
+                    id: "room_view".into(),
+                    kind: NodeKind::Struct,
+                    name: "RoomPageHeaderView".into(),
+                    file: PathBuf::from("RoomPage+Layout.swift"),
+                    span: Span {
+                        start: [0, 0],
+                        end: [1, 0],
+                    },
+                    visibility: Visibility::Public,
+                    metadata: StdHashMap::new(),
+                    role: None,
+                    signature: None,
+                    doc_comment: None,
+                    module: Some("Room".into()),
+                    snippet: None,
+                },
+                Node {
+                    id: "room_body".into(),
+                    kind: NodeKind::Property,
+                    name: "body".into(),
+                    file: PathBuf::from("RoomPage+Layout.swift"),
+                    span: Span {
+                        start: [1, 0],
+                        end: [6, 0],
+                    },
+                    visibility: Visibility::Public,
+                    metadata: StdHashMap::new(),
+                    role: None,
+                    signature: Some("var body: some View".into()),
+                    doc_comment: None,
+                    module: Some("Room".into()),
+                    snippet: None,
+                },
+                Node {
+                    id: "room_body_getter".into(),
+                    kind: NodeKind::Function,
+                    name: "getter:body".into(),
+                    file: PathBuf::from("RoomPage+Layout.swift"),
+                    span: Span {
+                        start: [1, 0],
+                        end: [6, 0],
+                    },
+                    visibility: Visibility::Public,
+                    metadata: StdHashMap::new(),
+                    role: None,
+                    signature: Some("getter:body".into()),
+                    doc_comment: None,
+                    module: Some("Room".into()),
+                    snippet: None,
+                },
+                Node {
+                    id: "room_share".into(),
+                    kind: NodeKind::Function,
+                    name: "onShare()".into(),
+                    file: PathBuf::from("RoomPage+Layout.swift"),
+                    span: Span {
+                        start: [7, 0],
+                        end: [10, 0],
+                    },
+                    visibility: Visibility::Public,
+                    metadata: StdHashMap::new(),
+                    role: None,
+                    signature: Some("func onShare()".into()),
+                    doc_comment: None,
+                    module: Some("Room".into()),
+                    snippet: None,
+                },
+                make_node(
+                    "cache_terminal",
+                    Some(NodeRole::Terminal {
+                        kind: TerminalKind::Cache,
+                    }),
+                ),
+            ],
+            edges: vec![
+                Edge {
+                    source: "room_body".into(),
+                    target: "room_view".into(),
+                    kind: EdgeKind::Implements,
+                    confidence: 1.0,
+                    direction: None,
+                    operation: None,
+                    condition: None,
+                    async_boundary: None,
+                    provenance: Vec::new(),
+                },
+                Edge {
+                    source: "room_share".into(),
+                    target: "room_view".into(),
+                    kind: EdgeKind::Implements,
+                    confidence: 1.0,
+                    direction: None,
+                    operation: None,
+                    condition: None,
+                    async_boundary: None,
+                    provenance: Vec::new(),
+                },
+                Edge {
+                    source: "room_view".into(),
+                    target: "room_body_getter".into(),
+                    kind: EdgeKind::TypeRef,
+                    confidence: 1.0,
+                    direction: None,
+                    operation: None,
+                    condition: None,
+                    async_boundary: None,
+                    provenance: Vec::new(),
+                },
+                {
+                    let mut e = make_edge("room_share", "cache_terminal", EdgeKind::Reads);
+                    e.direction = Some(FlowDirection::Read);
+                    e.operation = Some("resource".to_string());
+                    e
+                },
+            ],
+        };
+
+        let result = query_trace(&graph, "RoomPageHeaderView", 10).unwrap();
+        assert!(result.fallback_used);
+        assert_eq!(
+            result.traced_roots,
+            vec![
+                "body".to_string(),
+                "getter:body".to_string(),
+                "onShare()".to_string()
+            ]
+        );
+        assert_eq!(result.summary.total_flows, 1);
+        assert_eq!(result.summary.reads, 1);
+        assert!(result.hint.is_none());
     }
 }

@@ -652,8 +652,7 @@ pub fn render_entries_with_options(result: &EntriesResult, options: RenderOption
     let children = result
         .entries
         .iter()
-        .cloned()
-        .map(|entry| TreeNode::leaf(format_symbol_ref(&entry, options)))
+        .map(|entry| TreeNode::leaf(format_symbol_ref(entry, options)))
         .collect();
 
     render_tree(&TreeNode::branch(
@@ -842,27 +841,48 @@ pub fn render_trace_with_options(result: &TraceResult, options: RenderOptions) -
         insert_trace_flow(&mut flows, flow, options);
     }
 
-    let root = TreeNode::branch(
-        format_symbol_ref(&result.entry_ref, options),
-        vec![
-            TreeNode::leaf(format_summary(
-                &[
-                    ("flows", result.summary.total_flows.to_string()),
-                    ("reads", result.summary.reads.to_string()),
-                    ("writes", result.summary.writes.to_string()),
-                    (
-                        "async_crossings",
-                        result.summary.async_crossings.to_string(),
-                    ),
-                ],
-                options,
-            )),
-            TreeNode::branch(
-                format_section_count("flows", result.summary.total_flows, options),
-                flows.into_tree_children(),
+    let mut children = vec![
+        TreeNode::leaf(format_key_value(
+            "requested_symbol",
+            &result.requested_symbol,
+            options,
+        )),
+        TreeNode::leaf(format_key_value(
+            "traced_roots",
+            &result.traced_roots.join(", "),
+            options,
+        )),
+        TreeNode::leaf(format_key_value(
+            "fallback_used",
+            if result.fallback_used {
+                "true"
+            } else {
+                "false"
+            },
+            options,
+        )),
+    ];
+    if let Some(hint) = result.hint.as_deref() {
+        children.push(TreeNode::leaf(format_key_value("hint", hint, options)));
+    }
+    children.push(TreeNode::leaf(format_summary(
+        &[
+            ("flows", result.summary.total_flows.to_string()),
+            ("reads", result.summary.reads.to_string()),
+            ("writes", result.summary.writes.to_string()),
+            (
+                "async_crossings",
+                result.summary.async_crossings.to_string(),
             ),
         ],
-    );
+        options,
+    )));
+    children.push(TreeNode::branch(
+        format_section_count("flows", result.summary.total_flows, options),
+        flows.into_tree_children(),
+    ));
+
+    let root = TreeNode::branch(format_symbol_ref(&result.entry_ref, options), children);
 
     render_tree(&root)
 }
@@ -1493,6 +1513,10 @@ mod tests {
     fn trace_merges_shared_prefixes_and_renders_notes() {
         let result = TraceResult {
             entry: "main.rs::main".to_string(),
+            requested_symbol: "main.rs::main".to_string(),
+            traced_roots: vec!["main.rs::main".to_string()],
+            fallback_used: false,
+            hint: None,
             flows: vec![
                 Flow {
                     path: vec!["main".into(), "service".into(), "db".into()],
@@ -1526,6 +1550,9 @@ mod tests {
 
         let rendered = render_trace_with_options(&result, RenderOptions::plain());
         assert!(rendered.contains("main [function] (main.rs)"));
+        assert!(rendered.contains("requested_symbol: main.rs::main"));
+        assert!(rendered.contains("traced_roots: main.rs::main"));
+        assert!(rendered.contains("fallback_used: false"));
         assert!(rendered.contains("summary: flows=2, reads=0, writes=2, async_crossings=1"));
         assert!(rendered.contains("service"));
         assert!(rendered.contains("db [terminal:persistence write save]"));

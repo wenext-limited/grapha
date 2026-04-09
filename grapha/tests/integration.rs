@@ -557,6 +557,44 @@ fn flow_entries_file_scope_and_limit_returns_focused_subset() {
 }
 
 #[test]
+fn flow_entries_file_filter_rejects_partial_fragments() {
+    let dir = tempfile::tempdir().unwrap();
+    let store_dir = dir.path().join(".grapha");
+
+    std::fs::write(
+        dir.path().join("RoomPage.rs"),
+        r#"
+        pub fn room_page() {}
+        "#,
+    )
+    .unwrap();
+
+    grapha()
+        .args([
+            "index",
+            dir.path().to_str().unwrap(),
+            "--store-dir",
+            store_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    grapha()
+        .args([
+            "flow",
+            "entries",
+            "-p",
+            dir.path().to_str().unwrap(),
+            "--file",
+            "Page",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"total\": 0"))
+        .stdout(predicate::str::contains("\"shown\": 0"));
+}
+
+#[test]
 fn flow_origin_help_mentions_full_field_alias() {
     grapha()
         .args(["flow", "origin", "--help"])
